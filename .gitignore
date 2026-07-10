@@ -1,0 +1,23 @@
+node_modules
+dist
+server/dist
+.env
+.env.docker
+server/uploads
+*.log
+
+# SSL certs tự ký (không commit private key)
+nginx/certs/*.key
+nginx/certs/*.crt
+
+# Scripts deploy chứa credentials — chỉ dùng local
+deploy-dev.mjs
+upload-dev.mjs
+restore-db-dev.mjs
+fix-docker-perm.mjs
+check-server.mjs
+_rebuild.mjs
+_upload.mjs
+_ssh_diag_tmp.js
+_test.txt
+.claude/

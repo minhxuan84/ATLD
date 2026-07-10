@@ -1,0 +1,40 @@
+# Dependencies
+node_modules
+server/node_modules
+
+# Build outputs
+dist
+server/dist
+
+# Development
+.git
+.gitignore
+.claude
+
+# Environment (không đóng gói secret vào image; truyền qua env_file lúc chạy)
+.env
+.env.local
+.env.docker
+server/.env
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+
+# Docs
+*.md
+PRD.MD
+ImplementationPlan.MD
