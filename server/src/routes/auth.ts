@@ -22,6 +22,7 @@ interface UserRow {
   full_name: string
   role: Role
   permissions: string[]
+  site_id: number | null
 }
 
 authRouter.post('/login', loginLimiter, async (req, res) => {
@@ -29,7 +30,7 @@ authRouter.post('/login', loginLimiter, async (req, res) => {
   if (typeof username !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Thiếu tên đăng nhập hoặc mật khẩu.' })
   }
-  const { rows } = await query<UserRow>('SELECT * FROM users WHERE username = $1', [username.trim()])
+  const { rows } = await query<UserRow>('SELECT id, username, password_hash, full_name, role, permissions, site_id FROM users WHERE username = $1', [username.trim()])
   const user = rows[0]
   // So sánh không lộ việc user có tồn tại hay không
   const ok = user ? await bcrypt.compare(password, user.password_hash) : false
@@ -39,6 +40,7 @@ authRouter.post('/login', loginLimiter, async (req, res) => {
   const authUser: AuthUser = {
     id: user.id, username: user.username, fullName: user.full_name, role: user.role,
     permissions: (Array.isArray(user.permissions) ? user.permissions : []) as AuthUser['permissions'],
+    siteId: user.site_id ?? null,
   }
   const token = signToken(authUser)
   res.json({ token, user: authUser })

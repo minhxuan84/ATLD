@@ -49,8 +49,9 @@ function cleanPermissions(input: unknown): string[] {
 
 adminRouter.get('/users', requireSection('nguoi-dung'), async (_req, res) => {
   const { rows } = await query(
-    `SELECT id, username, full_name, role, permissions, to_char(created_at,'YYYY-MM-DD') AS created_at
-     FROM users ORDER BY id`,
+    `SELECT u.id, u.username, u.full_name, u.role, u.permissions, u.site_id, b.name AS site_name,
+            to_char(u.created_at,'YYYY-MM-DD') AS created_at
+     FROM users u LEFT JOIN branches b ON b.id = u.site_id ORDER BY u.id`,
   )
   res.json({ users: rows })
 })
@@ -64,6 +65,8 @@ adminRouter.post('/users', requireSection('nguoi-dung'), async (req, res) => {
   const isAdmin = req.user!.role === 'admin'
   const role = isAdmin ? String(req.body?.role ?? 'trainee') : 'trainee'
   const permissions = isAdmin ? cleanPermissions(req.body?.permissions) : []
+  // Site chỉ do admin gán (chỉ ý nghĩa với officer). null = không giới hạn/không có site.
+  const siteId = isAdmin && req.body?.site_id ? Number(req.body.site_id) : null
   if (!/^[a-z0-9_.]{3,60}$/.test(username)) return res.status(400).json({ error: 'Tên đăng nhập không hợp lệ (3-60 ký tự, chữ thường/số/_).' })
   if (!fullName) return res.status(400).json({ error: 'Thiếu họ tên.' })
   if (password.length < 6) return res.status(400).json({ error: 'Mật khẩu tối thiểu 6 ký tự.' })
@@ -74,8 +77,8 @@ adminRouter.post('/users', requireSection('nguoi-dung'), async (req, res) => {
 
   const hash = await bcrypt.hash(password, 10)
   const { rows } = await query(
-    'INSERT INTO users (username, password_hash, full_name, role, permissions) VALUES ($1,$2,$3,$4,$5) RETURNING id',
-    [username, hash, fullName, role, JSON.stringify(permissions)],
+    'INSERT INTO users (username, password_hash, full_name, role, permissions, site_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
+    [username, hash, fullName, role, JSON.stringify(permissions), siteId],
   )
   res.status(201).json({ id: rows[0].id })
 })
@@ -92,6 +95,7 @@ adminRouter.put('/users/:id', requireSection('nguoi-dung'), async (req, res) => 
   if (isAdmin) {
     const role = String(req.body?.role ?? '')
     const permissions = cleanPermissions(req.body?.permissions)
+    const siteId = req.body?.site_id ? Number(req.body.site_id) : null
     if (!['trainee', 'officer', 'admin'].includes(role)) return res.status(400).json({ error: 'Vai trò không hợp lệ.' })
     // Không cho tự hạ quyền admin cuối cùng
     if (req.user!.id === id && role !== 'admin') {
@@ -101,9 +105,9 @@ adminRouter.put('/users/:id', requireSection('nguoi-dung'), async (req, res) => 
     if (password) {
       if (password.length < 6) return res.status(400).json({ error: 'Mật khẩu tối thiểu 6 ký tự.' })
       const hash = await bcrypt.hash(password, 10)
-      await query('UPDATE users SET full_name=$1, role=$2, permissions=$3, password_hash=$4 WHERE id=$5', [fullName, role, JSON.stringify(permissions), hash, id])
+      await query('UPDATE users SET full_name=$1, role=$2, permissions=$3, site_id=$4, password_hash=$5 WHERE id=$6', [fullName, role, JSON.stringify(permissions), siteId, hash, id])
     } else {
-      await query('UPDATE users SET full_name=$1, role=$2, permissions=$3 WHERE id=$4', [fullName, role, JSON.stringify(permissions), id])
+      await query('UPDATE users SET full_name=$1, role=$2, permissions=$3, site_id=$4 WHERE id=$5', [fullName, role, JSON.stringify(permissions), siteId, id])
     }
   } else {
     if (password) {
@@ -315,7 +319,8 @@ adminRouter.delete('/milestones/:id', requireSection('muc-tieu'), async (req, re
 
 // ---- Chi nhánh / đơn vị ----
 // GET danh sách chi nhánh cũng dùng cho dropdown trong form khóa học → cho phép cả 2 quyền.
-adminRouter.get('/branches', requireSection('chi-nhanh', 'khoa-hoc'), async (_req, res) => {
+// Danh sách chi nhánh (chỉ đọc) — dùng cho gán site người dùng/hợp đồng/khách nên mở cho cả 'an-toan' và 'nguoi-dung'.
+adminRouter.get('/branches', requireSection('chi-nhanh', 'khoa-hoc', 'an-toan', 'nguoi-dung'), async (_req, res) => {
   const { rows } = await query('SELECT id, name, location, sort_order FROM branches ORDER BY sort_order, id')
   res.json({ branches: rows })
 })

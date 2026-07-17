@@ -56,3 +56,60 @@ export async function downloadDoc(id: number, fileName: string) {
   a.click()
   URL.revokeObjectURL(url)
 }
+
+// Tải file bất kỳ theo path API (kèm JWT), lấy tên từ Content-Disposition nếu có.
+// Dùng cho xuất báo cáo Excel — không lộ token qua query param.
+export async function downloadFile(path: string, fallbackName: string) {
+  const token = getToken()
+  const res = await fetch(`/api${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => null)
+    throw new Error((data as { error?: string })?.error ?? 'Không tải được tệp.')
+  }
+  const cd = res.headers.get('Content-Disposition') ?? ''
+  const m = /filename="?([^"]+)"?/i.exec(cd)
+  const name = m?.[1] ?? fallbackName
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// Mở file bất kỳ (kèm JWT) trong tab mới bằng Blob URL — không lộ token qua query param.
+// LƯU Ý mobile: phải mở tab NGAY trong cử chỉ chạm (đồng bộ), trước await fetch —
+// nếu window.open() chạy sau await, Safari/Chrome mobile sẽ chặn như popup.
+export async function openFileInNewTab(path: string) {
+  const win = window.open('', '_blank')
+  const token = getToken()
+  try {
+    const res = await fetch(`/api${path}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => null)
+      throw new Error((data as { error?: string })?.error ?? 'Không mở được tệp.')
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    if (win) {
+      win.location.href = url
+    } else {
+      // Popup bị chặn dù đã mở đồng bộ → fallback bằng thẻ <a> (một số máy vẫn cho tải).
+      const a = document.createElement('a')
+      a.href = url
+      a.target = '_blank'
+      a.rel = 'noopener'
+      a.click()
+    }
+    // Thu hồi sau 1 phút để trình duyệt kịp render
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (e) {
+    win?.close()
+    throw e
+  }
+}

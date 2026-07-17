@@ -10,8 +10,12 @@ interface UserRow {
   full_name: string
   role: string
   permissions: CmsSection[]
+  site_id: number | null
+  site_name: string | null
   created_at: string
 }
+
+interface Branch { id: number; name: string; location: string }
 
 const ROLES = [
   { value: 'trainee', label: 'Học viên' },
@@ -24,22 +28,26 @@ export default function UsersManager() {
   const { user: me } = useAuth()
   const isAdmin = me?.role === 'admin'
   const [users, setUsers] = useState<UserRow[]>([])
+  const [branches, setBranches] = useState<Branch[]>([])
   const [editing, setEditing] = useState<UserRow | null>(null)
   const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState<{ username: string; fullName: string; role: string; password: string; permissions: CmsSection[] }>({ username: '', fullName: '', role: 'trainee', password: '', permissions: [] })
+  const [form, setForm] = useState<{ username: string; fullName: string; role: string; password: string; permissions: CmsSection[]; siteId: string }>({ username: '', fullName: '', role: 'trainee', password: '', permissions: [], siteId: '' })
   const [error, setError] = useState('')
 
   const fetchUsers = useCallback(() => {
     api<{ users: UserRow[] }>('/admin/users').then((d) => setUsers(d.users)).catch(() => {})
   }, [])
   useEffect(fetchUsers, [fetchUsers])
+  useEffect(() => {
+    if (isAdmin) api<{ branches: Branch[] }>('/admin/branches').then((d) => setBranches(d.branches)).catch(() => {})
+  }, [isAdmin])
 
   const openCreate = () => {
-    setForm({ username: '', fullName: '', role: 'trainee', password: '', permissions: [] })
+    setForm({ username: '', fullName: '', role: 'trainee', password: '', permissions: [], siteId: '' })
     setError(''); setCreating(true); setEditing(null)
   }
   const openEdit = (u: UserRow) => {
-    setForm({ username: u.username, fullName: u.full_name, role: u.role, password: '', permissions: u.permissions ?? [] })
+    setForm({ username: u.username, fullName: u.full_name, role: u.role, password: '', permissions: u.permissions ?? [], siteId: u.site_id ? String(u.site_id) : '' })
     setError(''); setEditing(u); setCreating(false)
   }
   const close = () => { setCreating(false); setEditing(null); setError('') }
@@ -54,13 +62,15 @@ export default function UsersManager() {
     // Chỉ gửi role/permissions khi là admin; server cũng chặn leo thang đặc quyền.
     const perms = form.role === 'officer' ? form.permissions : []
     try {
+      // Site chỉ ý nghĩa với officer; role khác thì gửi null để không giới hạn.
+      const siteId = form.role === 'officer' && form.siteId ? Number(form.siteId) : null
       if (editing) {
         const body: Record<string, unknown> = { fullName: form.fullName, password: form.password || undefined }
-        if (isAdmin) { body.role = form.role; body.permissions = perms }
+        if (isAdmin) { body.role = form.role; body.permissions = perms; body.site_id = siteId }
         await api(`/admin/users/${editing.id}`, { method: 'PUT', body })
       } else {
         const body: Record<string, unknown> = { username: form.username, fullName: form.fullName, password: form.password }
-        if (isAdmin) { body.role = form.role; body.permissions = perms }
+        if (isAdmin) { body.role = form.role; body.permissions = perms; body.site_id = siteId }
         await api('/admin/users', { method: 'POST', body })
       }
       close(); fetchUsers()
@@ -95,6 +105,7 @@ export default function UsersManager() {
               <th className="px-4 py-3 font-medium">Tên đăng nhập</th>
               <th className="px-4 py-3 font-medium">Họ tên</th>
               <th className="px-4 py-3 font-medium">Vai trò</th>
+              <th className="px-4 py-3 font-medium">Site phụ trách</th>
               <th className="px-4 py-3 font-medium">Ngày tạo</th>
               <th className="px-4 py-3" />
             </tr>
@@ -113,6 +124,11 @@ export default function UsersManager() {
                       {u.permissions?.length ? `${u.permissions.length} mục CMS` : 'chưa cấp quyền'}
                     </span>
                   )}
+                </td>
+                <td className="px-4 py-3 text-slate-600">
+                  {u.role === 'officer'
+                    ? (u.site_name ?? <span className="text-slate-400">Mọi site</span>)
+                    : <span className="text-slate-300">—</span>}
                 </td>
                 <td className="px-4 py-3 text-slate-400">{u.created_at}</td>
                 <td className="px-4 py-3">
@@ -168,6 +184,18 @@ export default function UsersManager() {
                     ))}
                   </div>
                   <p className="mt-1 text-xs text-slate-400">Cán bộ chỉ thấy và thao tác trong các mục được tích chọn.</p>
+                </div>
+              )}
+
+              {/* Site phụ trách: chỉ với officer. Bỏ trống + có quyền 'an-toan' toàn quyền = xem mọi site. */}
+              {isAdmin && form.role === 'officer' && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700">Chi nhánh / nhà máy phụ trách</label>
+                  <select value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                    <option value="">— Không giới hạn (mọi site) —</option>
+                    {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                  </select>
+                  <p className="mt-1 text-xs text-slate-400">Cán bộ chỉ thấy dữ liệu ATVSLĐ (hợp đồng, NLĐ, kiểm tra…) thuộc site này. Quyền “An toàn” toàn phần vẫn xem được mọi site.</p>
                 </div>
               )}
               <div>

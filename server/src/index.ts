@@ -8,6 +8,7 @@ import { authRouter } from './routes/auth.js'
 import { homeRouter } from './routes/home.js'
 import { coursesRouter } from './routes/courses.js'
 import { documentsRouter } from './routes/documents.js'
+import { hseRouter } from './routes/hse.js'
 import { newsRouter } from './routes/news.js'
 import { adminRouter } from './routes/admin.js'
 import { configRouter } from './routes/config.js'
@@ -51,6 +52,7 @@ app.use('/api/auth', authRouter)
 app.use('/api/home', homeRouter)
 app.use('/api/courses', coursesRouter)
 app.use('/api/documents', documentsRouter)
+app.use('/api/hse', hseRouter)
 app.use('/api/news', newsRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/config', configRouter)

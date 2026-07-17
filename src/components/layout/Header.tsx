@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { useAuth, hasCmsAccess } from '../../context/AuthContext'
+import { useAuth, hasCmsAccess, canAccess } from '../../context/AuthContext'
 import Logo from '../Logo'
-import { LogOut, LogIn, User, Settings } from 'lucide-react'
+import { LogOut, LogIn, User, Settings, HardHat } from 'lucide-react'
 
 const NAV = [
   { to: '/', label: 'Trang chủ', end: true },
@@ -44,6 +44,21 @@ export default function Header() {
                 </NavLink>
               </li>
             ))}
+            {/* Hiển thị link ATVSLĐ cho người dùng có quyền an-toan */}
+            {user && canAccess(user, 'an-toan') && (
+              <li>
+                <NavLink
+                  to="/cms/an-toan"
+                  className={({ isActive }) =>
+                    `flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                      isActive ? 'bg-vicem-100 text-vicem-700' : 'text-slate-600 hover:bg-slate-100'
+                    }`
+                  }
+                >
+                  <HardHat className="h-4 w-4" /> ATVSLĐ
+                </NavLink>
+              </li>
+            )}
           </ul>
         </nav>
 

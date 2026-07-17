@@ -1,24 +1,29 @@
 import { Router } from 'express'
 import { query } from '../db.js'
 import { requireAuth, requireSection } from '../auth.js'
-import { escapeText, sanitizeHtml } from '../util.js'
+import { escapeText, sanitizeHtml, decodeEntities } from '../util.js'
 
 export const newsRouter = Router()
 
-// Tạo tóm tắt từ nội dung HTML: bỏ thẻ, cắt gọn
+// Tạo tóm tắt từ nội dung HTML: bỏ thẻ, GIẢI MÃ entity về ký tự thật, cắt gọn.
+// Phải decode sau khi bỏ thẻ, nếu không phần tóm tắt (hiển thị dạng text) sẽ hiện
+// entity thô như "&aacute;", "&ocirc;" thay vì "á", "ô".
 function makeExcerpt(html: string): string {
-  const text = html.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
+  const stripped = html.replace(/<[^>]+>/g, ' ')
+  const text = decodeEntities(stripped).replace(/\s+/g, ' ').trim()
   return text.slice(0, 160) + (text.length > 160 ? '…' : '')
 }
 
 // Danh sách tin tức (công khai cho người đã đăng nhập & trang chủ)
+// Tính lại excerpt từ content khi đọc → sửa cả tin cũ đã lưu entity thô, không cần migration.
 newsRouter.get('/', async (_req, res) => {
-  const { rows } = await query(
+  const { rows } = await query<{ id: number; title: string; category: string; excerpt: string; content: string; author: string; date: string }>(
     `SELECT id, title, category, excerpt, content, author,
             to_char(created_at, 'YYYY-MM-DD') AS date
      FROM news ORDER BY created_at DESC`,
   )
-  res.json({ news: rows })
+  const news = rows.map((r) => ({ ...r, excerpt: makeExcerpt(r.content) }))
+  res.json({ news })
 })
 
 newsRouter.get('/:id', async (req, res) => {

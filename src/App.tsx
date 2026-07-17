@@ -11,6 +11,8 @@ const RegisterPage = lazy(() => import('./pages/RegisterPage'))
 const TrainingListPage = lazy(() => import('./pages/TrainingListPage'))
 const TrainingDetailPage = lazy(() => import('./pages/TrainingDetailPage'))
 const DocumentsPage = lazy(() => import('./pages/DocumentsPage'))
+const HsePage = lazy(() => import('./pages/hse/HsePage'))
+const GatePage = lazy(() => import('./pages/hse/GatePage'))
 const NewsPage = lazy(() => import('./pages/NewsPage'))
 const NewsDetailPage = lazy(() => import('./pages/NewsDetailPage'))
 const CmsLayout = lazy(() => import('./pages/cms/CmsLayout'))
@@ -63,6 +65,7 @@ function PublicShell() {
           <Route path="/huan-luyen" element={<Protected><TrainingListPage /></Protected>} />
           <Route path="/huan-luyen/:id" element={<Protected><TrainingDetailPage /></Protected>} />
           <Route path="/tai-lieu" element={<Protected><DocumentsPage /></Protected>} />
+          <Route path="/cong-kiem-soat" element={<Protected><GatePage /></Protected>} />
           <Route path="*" element={<div className="py-20 text-center text-slate-500">Không tìm thấy trang.</div>} />
         </Routes>
       </main>
@@ -86,6 +89,7 @@ export default function App() {
         <Route path="truong-trac-nghiem" element={<SectionGuard section="truong-trac-nghiem"><QuizFieldsManager /></SectionGuard>} />
         <Route path="tin-tuc" element={<SectionGuard section="tin-tuc"><NewsManager /></SectionGuard>} />
         <Route path="tai-lieu" element={<SectionGuard section="tai-lieu"><DocumentsPage /></SectionGuard>} />
+        <Route path="an-toan/*" element={<SectionGuard section="an-toan"><HsePage /></SectionGuard>} />
         <Route path="muc-tieu" element={<SectionGuard section="muc-tieu"><GoalsManager /></SectionGuard>} />
         <Route path="menu" element={<SectionGuard section="menu"><MenuManager /></SectionGuard>} />
         <Route path="trang-tinh" element={<SectionGuard section="trang-tinh"><SiteSettings /></SectionGuard>} />

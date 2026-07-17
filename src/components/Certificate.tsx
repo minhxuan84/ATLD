@@ -1,4 +1,5 @@
-import { Award, Printer } from 'lucide-react'
+import { useState } from 'react'
+import { Award, Printer, Download } from 'lucide-react'
 
 export interface CertData {
   certId: string
@@ -9,6 +10,33 @@ export interface CertData {
 }
 
 export default function Certificate({ data }: { data: CertData }) {
+  const [downloading, setDownloading] = useState(false)
+
+  // Tải chứng chỉ PDF: chụp phần tử #certificate bằng html2canvas (render đúng
+  // tiếng Việt theo trình duyệt), rồi ghép vào 1 trang PDF vừa khít. Dynamic import
+  // để không phình bundle chính — 2 thư viện chỉ tải khi người dùng bấm nút.
+  const downloadPdf = async () => {
+    setDownloading(true)
+    try {
+      const el = document.getElementById('certificate')
+      if (!el) throw new Error('Không tìm thấy chứng chỉ.')
+      const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
+        import('html2canvas'),
+        import('jspdf'),
+      ])
+      const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#ffffff', useCORS: true })
+      const img = canvas.toDataURL('image/png')
+      // Trang ngang, kích thước theo tỉ lệ ảnh để không méo.
+      const pdf = new jsPDF({ orientation: canvas.width >= canvas.height ? 'landscape' : 'portrait', unit: 'px', format: [canvas.width, canvas.height] })
+      pdf.addImage(img, 'PNG', 0, 0, canvas.width, canvas.height)
+      pdf.save(`ChungChi_${data.certId}.pdf`)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Không tạo được PDF.')
+    } finally {
+      setDownloading(false)
+    }
+  }
+
   return (
     <div className="mt-4">
       <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">
@@ -35,12 +63,19 @@ export default function Certificate({ data }: { data: CertData }) {
         </div>
       </div>
 
-      <div className="mt-4 flex justify-end print:hidden">
+      <div className="mt-4 flex flex-wrap justify-end gap-3 print:hidden">
         <button
           onClick={() => window.print()}
-          className="inline-flex items-center gap-2 rounded-lg bg-vicem-600 px-5 py-2.5 font-semibold text-white hover:bg-vicem-700"
+          className="inline-flex items-center gap-2 rounded-lg border border-vicem-600 px-5 py-2.5 font-semibold text-vicem-700 hover:bg-vicem-50"
         >
-          <Printer className="h-4 w-4" /> In / Tải chứng chỉ
+          <Printer className="h-4 w-4" /> In chứng chỉ
+        </button>
+        <button
+          onClick={downloadPdf}
+          disabled={downloading}
+          className="inline-flex items-center gap-2 rounded-lg bg-vicem-600 px-5 py-2.5 font-semibold text-white hover:bg-vicem-700 disabled:opacity-50"
+        >
+          <Download className="h-4 w-4" /> {downloading ? 'Đang tạo PDF…' : 'Tải chứng chỉ (PDF)'}
         </button>
       </div>
     </div>

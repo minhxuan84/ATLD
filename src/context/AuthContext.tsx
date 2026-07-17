@@ -8,12 +8,26 @@ export interface AuthUser {
   fullName: string
   role: Role
   permissions: CmsSection[]
+  siteId: number | null // Chi nhánh/nhà máy phụ trách (null = xem mọi site)
+}
+
+// user xem được mọi site (admin, hoặc chưa gán site) hay bị giới hạn theo siteId.
+// Lưu ý: quyền 'an-toan' chỉ mở truy cập module HSE, KHÔNG bỏ giới hạn site — phải khớp siteScope() ở backend.
+export function seesAllSites(user: AuthUser | null): boolean {
+  if (!user) return false
+  return user.role === 'admin' || user.siteId == null
 }
 
 // Tiện ích: user có quyền vào một mục CMS không (admin luôn có).
 export function canAccess(user: AuthUser | null, section: CmsSection): boolean {
   if (!user) return false
   return user.role === 'admin' || user.permissions?.includes(section)
+}
+// Kiểm tra sub-permission HSE. Admin và 'an-toan' toàn quyền luôn pass.
+export function canHse(user: AuthUser | null, ...subKeys: ('gate' | 'inspect' | 'approve')[]): boolean {
+  if (!user) return false
+  if (user.role === 'admin' || user.permissions?.includes('an-toan')) return true
+  return subKeys.some((k) => user.permissions?.includes(`an-toan:${k}` as CmsSection))
 }
 // user có được vào khu vực CMS nói chung không (admin hoặc có ít nhất 1 quyền).
 export function hasCmsAccess(user: AuthUser | null): boolean {
