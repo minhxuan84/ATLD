@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
-import { authRouter } from './routes/auth.js'
+import { authRouter, initAuthDb } from './routes/auth.js'
 import { homeRouter } from './routes/home.js'
 import { coursesRouter } from './routes/courses.js'
 import { documentsRouter } from './routes/documents.js'
@@ -81,6 +81,12 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 })
 
 const port = Number(process.env.PORT) || 4000
-app.listen(port, () => {
+app.listen(port, async () => {
+  try {
+    await initAuthDb()
+    console.log('[atld-auth] Migration auth_provider OK')
+  } catch (e) {
+    console.warn('[atld-auth] Migration warning:', (e as Error).message)
+  }
   console.log(`[atld-api] Máy chủ chạy tại http://localhost:${port}`)
 })

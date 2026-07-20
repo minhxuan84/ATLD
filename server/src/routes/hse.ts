@@ -10,6 +10,8 @@ import ExcelJS from 'exceljs'
 import { query } from '../db.js'
 import { requireAuth, requireSection, requireHse, siteScope } from '../auth.js'
 import type { AuthUser } from '../auth.js'
+import { buildCommitmentPdf, hashPdf } from '../lib/pdf.js'
+import { initiateSign, getSignStatus, verifyWebhookSignature } from '../lib/smartca.js'
 import { escapeText, sanitizeFileName, ALLOWED_EXT, MAX_FILE_MB } from '../util.js'
 
 export const hseRouter = Router()
@@ -366,6 +368,19 @@ async function audit(
     await query(`UPDATE atld.hse_visitors SET site_id = COALESCE(
       (SELECT id FROM atld.branches WHERE name ILIKE '%Kiên Lương%' ORDER BY id LIMIT 1),
       (SELECT id FROM atld.branches ORDER BY sort_order, id LIMIT 1)) WHERE site_id IS NULL`)
+
+    // ── SmartCA VNPT: chữ ký số cho cam kết và hồ sơ ─────────────────
+    await query(`ALTER TABLE atld.hse_commitments ADD COLUMN IF NOT EXISTS smartca_tx_id TEXT`)
+    await query(`ALTER TABLE atld.hse_commitments ADD COLUMN IF NOT EXISTS smartca_signature TEXT`)
+    await query(`ALTER TABLE atld.hse_commitments ADD COLUMN IF NOT EXISTS smartca_cert_serial TEXT`)
+    await query(`ALTER TABLE atld.hse_commitments ADD COLUMN IF NOT EXISTS smartca_cert_subject TEXT`)
+    await query(`ALTER TABLE atld.hse_dossiers ADD COLUMN IF NOT EXISTS approved_tx_id TEXT`)
+    await query(`ALTER TABLE atld.hse_dossiers ADD COLUMN IF NOT EXISTS approved_cert_serial TEXT`)
+
+    // ── Nhận diện khuôn mặt tại cổng (face-api.js browser-side) ──────
+    // face_descriptor: Float32Array 128 chiều, lưu dưới dạng JSON array
+    await query(`ALTER TABLE atld.hse_workers ADD COLUMN IF NOT EXISTS face_descriptor JSONB`)
+    await query(`ALTER TABLE atld.hse_visitors ADD COLUMN IF NOT EXISTS face_descriptor JSONB`)
 
     // Seed 11 nhóm hồ sơ nhà thầu (BM111-07.02) — upsert theo code, không phá dữ liệu cũ.
     await query(`
@@ -1634,6 +1649,172 @@ hseRouter.patch('/commitments/:id/sign', ...canInspect, async (req, res) => {
     [signerName, escapeText(String(b.signer_title ?? '')), sig, verifyCode, id])
   await audit(req.user!, 'COMMITMENT_SIGN', 'commitment', id, null, { signerName }, clientIp(req))
   res.json({ ok: true, verify_code: verifyCode })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SmartCA VNPT — chữ ký số cho cam kết ATVSLĐ/PCCN/BVMT
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface CommitmentRow {
+  id: number; title: string; content: string; contract_no: string
+  contract_title: string; contractor_name: string
+  signer_name: string; signer_title: string
+  status: string; created_at: string; verify_code: string | null
+  smartca_tx_id: string | null; smartca_signature: string | null
+}
+
+/** POST /hse/commitments/:id/smartca/init — Khởi tạo giao dịch ký SmartCA */
+hseRouter.post('/commitments/:id/smartca/init', ...canInspect, async (req, res) => {
+  if (!process.env.SMARTCA_API_URL) {
+    return res.status(503).json({ error: 'Chữ ký số SmartCA chưa được kích hoạt.' })
+  }
+  const id = Number(req.params.id)
+  const b = req.body ?? {}
+  const signerName = escapeText(String(b.signer_name ?? '').trim())
+  const signerTitle = escapeText(String(b.signer_title ?? '').trim())
+  if (!signerName) return res.status(400).json({ error: 'Thiếu tên người ký.' })
+
+  const { rows } = await query<CommitmentRow>(
+    `SELECT cm.id, cm.title, cm.content, cm.created_at, cm.verify_code,
+            c.contract_no, c.title AS contract_title, ct.name AS contractor_name
+     FROM atld.hse_commitments cm
+     JOIN atld.hse_contracts c ON c.id = cm.contract_id
+     LEFT JOIN atld.hse_contractors ct ON ct.id = c.contractor_id
+     WHERE cm.id = $1`, [id])
+  const cmt = rows[0]
+  if (!cmt) return res.status(404).json({ error: 'Không tìm thấy bản cam kết.' })
+  if (cmt.smartca_tx_id) return res.status(409).json({ error: 'Đã có giao dịch ký đang chờ xử lý.' })
+
+  // Tạo PDF + hash
+  const verifyCode = cmt.verify_code ?? `ATLD|CMT|${id}|${crypto.randomUUID().slice(0, 8)}`
+  const pdfBuffer = await buildCommitmentPdf({
+    id, title: cmt.title, content: cmt.content,
+    contractNo: cmt.contract_no, contractTitle: cmt.contract_title,
+    contractorName: cmt.contractor_name,
+    signerName, signerTitle,
+    verifyCode, createdAt: cmt.created_at,
+  })
+  const docHash = hashPdf(pdfBuffer)
+
+  // Gọi SmartCA API
+  const protocol = req.secure ? 'https' : 'http'
+  const callbackUrl = `${protocol}://${req.headers.host}/api/hse/smartca/callback`
+  const tx = await initiateSign(docHash, `Cam kết ${cmt.contract_no}`, callbackUrl)
+
+  // Lưu txId tạm thời + cập nhật verify_code và signer
+  await query(
+    `UPDATE atld.hse_commitments SET smartca_tx_id = $1, verify_code = $2,
+            signer_name = $3, signer_title = $4, updated_at = now() WHERE id = $5`,
+    [tx.txId, verifyCode, signerName, signerTitle, id])
+
+  res.json({ txId: tx.txId, qrUrl: tx.qrUrl, deeplink: tx.deeplink, expiresAt: tx.expiresAt })
+})
+
+/** GET /hse/commitments/:id/smartca/status — Polling trạng thái ký */
+hseRouter.get('/commitments/:id/smartca/status', requireAuth, async (req, res) => {
+  if (!process.env.SMARTCA_API_URL) return res.status(503).json({ error: 'SmartCA chưa kích hoạt.' })
+  const id = Number(req.params.id)
+  const { rows } = await query<{ smartca_tx_id: string | null }>(
+    `SELECT smartca_tx_id FROM atld.hse_commitments WHERE id = $1`, [id])
+  if (!rows[0]?.smartca_tx_id) return res.status(404).json({ error: 'Không có giao dịch ký nào.' })
+
+  const result = await getSignStatus(rows[0].smartca_tx_id)
+
+  // Khi đã ký thành công → cập nhật DB ngay (fallback nếu webhook không tới)
+  if (result.status === 'signed' && result.signature) {
+    await query(
+      `UPDATE atld.hse_commitments SET status = 'signed', smartca_signature = $1,
+              smartca_cert_serial = $2, smartca_cert_subject = $3,
+              signed_at = now(), smartca_tx_id = NULL, updated_at = now()
+       WHERE id = $4 AND status <> 'signed'`,
+      [result.signature, result.certSerial ?? '', result.certSubject ?? '', id])
+    await audit(req.user!, 'COMMITMENT_SIGN_SMARTCA', 'commitment', id, null,
+      { certSerial: result.certSerial }, clientIp(req))
+  }
+  res.json(result)
+})
+
+/** POST /hse/smartca/callback — Webhook từ VNPT SmartCA (HMAC-verified) */
+hseRouter.post('/smartca/callback', async (req, res) => {
+  const sig = String(req.headers['x-smartca-signature'] ?? '')
+  const rawBody = JSON.stringify(req.body)
+  if (!verifyWebhookSignature(rawBody, sig)) {
+    return res.status(401).json({ error: 'Chữ ký webhook không hợp lệ.' })
+  }
+  const { transactionId, status, signature, certSerial, certSubject } = req.body ?? {}
+  if (status === 'signed' && transactionId && signature) {
+    await query(
+      `UPDATE atld.hse_commitments SET status = 'signed', smartca_signature = $1,
+              smartca_cert_serial = $2, smartca_cert_subject = $3,
+              signed_at = now(), smartca_tx_id = NULL, updated_at = now()
+       WHERE smartca_tx_id = $4 AND status <> 'signed'`,
+      [signature, certSerial ?? '', certSubject ?? '', transactionId])
+  } else if (status === 'rejected' || status === 'expired') {
+    await query(
+      `UPDATE atld.hse_commitments SET smartca_tx_id = NULL, updated_at = now()
+       WHERE smartca_tx_id = $1`, [transactionId])
+  }
+  res.json({ ok: true })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Nhận diện khuôn mặt — lưu/đọc face descriptor (face-api.js, xử lý browser)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** PATCH /hse/workers/:id/face — Lưu face descriptor cho NLĐ */
+hseRouter.patch('/workers/:id/face', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  const descriptor = req.body?.descriptor
+  if (!Array.isArray(descriptor) || descriptor.length !== 128 ||
+      !descriptor.every((v: unknown) => typeof v === 'number')) {
+    return res.status(400).json({ error: 'Descriptor phải là mảng 128 số thực.' })
+  }
+  await query(
+    `UPDATE atld.hse_workers SET face_descriptor = $1::jsonb WHERE id = $2`,
+    [JSON.stringify(descriptor), id])
+  await audit(req.user!, 'WORKER_FACE_ENROLL', 'worker', id, null, {}, clientIp(req))
+  res.json({ ok: true })
+})
+
+/** PATCH /hse/visitors/:id/face — Lưu face descriptor cho khách */
+hseRouter.patch('/visitors/:id/face', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  const descriptor = req.body?.descriptor
+  if (!Array.isArray(descriptor) || descriptor.length !== 128 ||
+      !descriptor.every((v: unknown) => typeof v === 'number')) {
+    return res.status(400).json({ error: 'Descriptor phải là mảng 128 số thực.' })
+  }
+  await query(
+    `UPDATE atld.hse_visitors SET face_descriptor = $1::jsonb WHERE id = $2`,
+    [JSON.stringify(descriptor), id])
+  res.json({ ok: true })
+})
+
+/**
+ * GET /hse/gate/descriptors — Trả về face descriptors của workers + visitors
+ * đang có status allowed cho site hiện tại. Dùng bởi GatePage để nhận diện offline.
+ */
+hseRouter.get('/gate/descriptors', requireAuth, requireHse('gate', 'inspect', 'approve'), async (req, res) => {
+  const { all, siteId } = siteScope(req.user!)
+  const workers = await query<{ id: number; full_name: string; descriptor: number[] }>(
+    `SELECT w.id, w.full_name, w.face_descriptor AS descriptor
+     FROM atld.hse_workers w
+     JOIN atld.hse_contracts c ON c.id = w.contract_id
+     WHERE w.face_descriptor IS NOT NULL
+       AND w.access_status = 'allowed'
+       AND ($1::boolean OR c.site_id = $2)`,
+    [all, siteId])
+  const visitors = await query<{ id: number; full_name: string; descriptor: number[]; qr_code: string }>(
+    `SELECT id, full_name, face_descriptor AS descriptor, qr_code
+     FROM atld.hse_visitors
+     WHERE face_descriptor IS NOT NULL
+       AND access_status = 'allowed'
+       AND ($1::boolean OR site_id = $2)`,
+    [all, siteId])
+  res.json({
+    workers: workers.rows.map((r) => ({ id: r.id, name: r.full_name, type: 'worker', descriptor: r.descriptor })),
+    visitors: visitors.rows.map((r) => ({ id: r.id, name: r.full_name, type: 'visitor', descriptor: r.descriptor, qr_code: r.qr_code })),
+  })
 })
 
 // ═══════════════ MA TRẬN ĐIỀU KIỆN (Phase D) ═══════════════

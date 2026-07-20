@@ -39,6 +39,7 @@ interface AuthState {
   user: AuthUser | null
   loading: boolean
   login: (username: string, password: string, remember?: boolean) => Promise<void>
+  ldapLogin: (username: string, password: string, remember?: boolean) => Promise<void>
   logout: () => void
 }
 
@@ -70,12 +71,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(d.user)
   }
 
+  const ldapLogin = async (username: string, password: string, remember = true) => {
+    const d = await api<{ token: string; user: AuthUser }>('/auth/ldap-login', {
+      method: 'POST',
+      body: { username, password },
+    })
+    setToken(d.token, remember)
+    setUser(d.user)
+  }
+
   const logout = () => {
     setToken(null)
     setUser(null)
   }
 
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>
+  return <AuthContext.Provider value={{ user, loading, login, ldapLogin, logout }}>{children}</AuthContext.Provider>
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

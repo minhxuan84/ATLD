@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api, openFileInNewTab } from '../../lib/api'
 import { fmtDate } from '../../lib/date'
+import FaceEnrollModal from '../../components/hse/FaceEnrollModal'
 
 interface Worker {
   id: number; full_name: string; id_number: string | null; job_title: string | null
@@ -131,6 +132,7 @@ function WorkerDetail({ worker, detail, docTypes, onRefresh }: {
   docTypes: DocType[]; onRefresh: () => void
 }) {
   const [showUpload, setShowUpload] = useState(false)
+  const [showFaceEnroll, setShowFaceEnroll] = useState(false)
   const [upDocType, setUpDocType] = useState('')
   const [expiry, setExpiry] = useState('')
   const [file, setFile] = useState<File | null>(null)
@@ -178,6 +180,11 @@ function WorkerDetail({ worker, detail, docTypes, onRefresh }: {
           <button onClick={() => { setShowUpload(true); setErr('') }}
             className="rounded bg-vicem-500 px-3 py-1.5 text-xs font-medium text-white hover:opacity-90">
             + Upload hồ sơ
+          </button>
+          <button onClick={() => setShowFaceEnroll(true)}
+            className="rounded bg-slate-600 px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+            title="Đăng ký khuôn mặt để nhận diện tại cổng">
+            📷 Khuôn mặt
           </button>
         </div>
       </div>
@@ -236,6 +243,16 @@ function WorkerDetail({ worker, detail, docTypes, onRefresh }: {
           {detail.docs.length === 0 && <tr><td colSpan={5} className="py-4 text-center text-slate-400">Chưa có hồ sơ.</td></tr>}
         </tbody>
       </table>
+
+      {showFaceEnroll && worker && (
+        <FaceEnrollModal
+          id={worker.id}
+          type="worker"
+          name={worker.full_name}
+          onClose={() => setShowFaceEnroll(false)}
+          onSuccess={onRefresh}
+        />
+      )}
 
       {showUpload && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowUpload(false)}>

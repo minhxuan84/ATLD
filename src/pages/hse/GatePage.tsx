@@ -4,6 +4,11 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode'
 import { api } from '../../lib/api'
 import { fmtDate } from '../../lib/date'
+import { loadModels, detectFaceWithBox, matchFace } from '../../lib/faceRecognition'
+import type { FaceCandidate } from '../../lib/faceRecognition'
+
+/** FaceCandidate mở rộng: khách/NCC có thêm qr_code để gọi lookupVisitor trực tiếp */
+type GateFaceCandidate = FaceCandidate & { qr_code?: string }
 
 // Backend /hse/gate/lookup trả về { results: [...] } với shape này:
 interface GateWorker {
@@ -97,6 +102,13 @@ export default function GatePage({ embedded = false }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scannerRef = useRef<Html5Qrcode | null>(null)
+
+  // ── Chế độ nhận diện khuôn mặt ──────────────────────────────────
+  const [faceMode, setFaceMode] = useState(false)
+  const [faceStatus, setFaceStatus] = useState<'loading' | 'scanning'>('loading')
+  const faceVideoRef = useRef<HTMLVideoElement>(null)
+  const faceStreamRef = useRef<MediaStream | null>(null)
+  const faceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadHistory = useCallback(async () => {
     try {
@@ -246,6 +258,75 @@ export default function GatePage({ embedded = false }: Props) {
     return () => { cancelled = true; void stopScanner() }
   }, [scanOpen, onScan, stopScanner])
 
+  // ── Vòng đời chế độ nhận diện khuôn mặt ────────────────────────
+  useEffect(() => {
+    if (!faceMode) {
+      faceIntervalRef.current && clearInterval(faceIntervalRef.current)
+      faceIntervalRef.current = null
+      faceStreamRef.current?.getTracks().forEach((t) => t.stop())
+      faceStreamRef.current = null
+      return
+    }
+    let cancelled = false
+    setFaceStatus('loading')
+    ;(async () => {
+      try {
+        const [descData] = await Promise.all([
+          api<{
+            workers: GateFaceCandidate[]
+            visitors: GateFaceCandidate[]
+          }>('/hse/gate/descriptors'),
+          loadModels(),
+        ])
+        if (cancelled) return
+        const candidates: GateFaceCandidate[] = [...descData.workers, ...descData.visitors]
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } },
+        })
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return }
+        faceStreamRef.current = stream
+        if (faceVideoRef.current) faceVideoRef.current.srcObject = stream
+        setFaceStatus('scanning')
+
+        // Nhận diện mỗi 800 ms — dừng ngay sau khi khớp thành công
+        faceIntervalRef.current = setInterval(async () => {
+          if (!faceVideoRef.current || cancelled) return
+          const detection = await detectFaceWithBox(faceVideoRef.current).catch(() => null)
+          if (!detection || cancelled) return
+          const match = matchFace(detection.descriptor, candidates)
+          if (!match) return
+
+          clearInterval(faceIntervalRef.current!)
+          faceIntervalRef.current = null
+          if (!cancelled) {
+            setFaceMode(false)
+            if (match.type === 'worker') {
+              setQ(match.name)
+              await search(match.name)
+            } else {
+              const vc = candidates.find((c) => c.id === match.id && c.type === 'visitor')
+              if (vc?.qr_code) await lookupVisitor(vc.qr_code)
+            }
+          }
+        }, 800)
+      } catch (e) {
+        if (!cancelled) {
+          setFaceMode(false)
+          setErr(e instanceof Error ? e.message : 'Không khởi động được nhận diện khuôn mặt.')
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      faceIntervalRef.current && clearInterval(faceIntervalRef.current)
+      faceIntervalRef.current = null
+      faceStreamRef.current?.getTracks().forEach((t) => t.stop())
+      faceStreamRef.current = null
+    }
+  }, [faceMode, search, lookupVisitor])
+
   const allowed = !!selected && selected.eligible && selected.access_status !== 'suspended'
 
   const wrap = (children: React.ReactNode) =>
@@ -286,7 +367,47 @@ export default function GatePage({ embedded = false }: Props) {
         >
           📷 QR
         </button>
+        <button
+          onClick={() => setFaceMode(true)}
+          disabled={faceMode}
+          className="shrink-0 rounded-xl bg-indigo-600 px-4 py-3 text-base font-bold text-white shadow disabled:opacity-50 active:bg-indigo-700"
+          title="Nhận diện khuôn mặt"
+        >
+          🤳
+        </button>
       </div>
+
+      {/* Panel nhận diện khuôn mặt — hiện khi faceMode = true */}
+      {faceMode && (
+        <div className="relative overflow-hidden rounded-2xl bg-slate-900 shadow-xl">
+          <video
+            ref={faceVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full"
+          />
+          {/* Hình elip định vị khuôn mặt */}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="h-48 w-36 rounded-full border-2 border-dashed border-white/50" />
+          </div>
+          {faceStatus === 'loading' && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-900/80 text-white">
+              <span className="animate-spin text-3xl">⚙</span>
+              <span className="text-sm">Đang tải model nhận diện…</span>
+            </div>
+          )}
+          {faceStatus === 'scanning' && (
+            <div className="absolute bottom-3 left-0 right-0 flex justify-center">
+              <span className="rounded-full bg-black/60 px-3 py-1 text-xs text-white">Đang nhận diện khuôn mặt…</span>
+            </div>
+          )}
+          <button
+            onClick={() => setFaceMode(false)}
+            className="absolute right-2 top-2 rounded-lg bg-black/50 px-2.5 py-1 text-sm font-bold text-white hover:bg-black/70"
+          >✕</button>
+        </div>
+      )}
 
       {/* Lỗi chung */}
       {err && (

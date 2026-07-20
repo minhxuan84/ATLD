@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef, useLayoutEffect } from 'react
 import { api } from '../../lib/api'
 import { exportCommitmentPdf } from '../../lib/formPdf'
 import { fmtDate } from '../../lib/date'
+import SmartCAModal from '../../components/hse/SmartCAModal'
 
 interface Contract { id: number; contract_no: string; title: string; contractor_name: string }
 interface Commitment {
@@ -103,6 +104,7 @@ function CommitmentDetail({ commitment, onRefresh }: { commitment: CommitmentFul
   const [content, setContent] = useState('')
   const [editing, setEditing] = useState(false)
   const [signing, setSigning] = useState(false)
+  const [signingMode, setSigningMode] = useState<'canvas' | 'smartca' | null>(null)
   const [signer, setSigner] = useState({ name: '', title: '' })
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -196,13 +198,64 @@ function CommitmentDetail({ commitment, onRefresh }: { commitment: CommitmentFul
             <button onClick={saveContent} disabled={busy} className="rounded bg-slate-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">Lưu nội dung</button>
           </>
         )}
-        {!signed && !editing && <button onClick={() => { setSigning(true); setErr('') }} className="rounded bg-vicem-500 px-3 py-1.5 text-sm font-medium text-white hover:opacity-90">Ký cam kết</button>}
+        {!signed && !editing && (
+          <div className="relative inline-block">
+            <button
+              onClick={() => { setSigning(true); setErr('') }}
+              className="rounded bg-vicem-500 px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
+            >
+              Ký cam kết ▾
+            </button>
+          </div>
+        )}
         {signed && <button onClick={exportPdf} className="rounded bg-vicem-500 px-3 py-1.5 text-sm font-medium text-white hover:opacity-90">⬇ Xuất PDF</button>}
       </div>
 
-      {signing && !signed && (
+      {/* Chọn phương thức ký */}
+      {signing && !signed && !signingMode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setSigning(false)}>
+          <div className="w-full max-w-xs rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="mb-4 text-center text-base font-semibold text-slate-800">Chọn phương thức ký</h3>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={() => setSigningMode('canvas')}
+                className="flex items-center gap-3 rounded-lg border border-slate-200 px-4 py-3 text-left hover:bg-slate-50"
+              >
+                <span className="text-2xl">✍️</span>
+                <div>
+                  <p className="text-sm font-medium text-slate-800">Ký tay</p>
+                  <p className="text-xs text-slate-500">Vẽ chữ ký trực tiếp trên màn hình</p>
+                </div>
+              </button>
+              <button
+                onClick={() => setSigningMode('smartca')}
+                className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-left hover:bg-blue-100"
+              >
+                <span className="text-2xl">🔐</span>
+                <div>
+                  <p className="text-sm font-medium text-blue-800">Ký số SmartCA VNPT</p>
+                  <p className="text-xs text-blue-600">Chữ ký số pháp lý qua ứng dụng SmartCA</p>
+                </div>
+              </button>
+            </div>
+            <button onClick={() => setSigning(false)} className="mt-3 w-full text-center text-sm text-slate-400 hover:text-slate-600">Hủy</button>
+          </div>
+        </div>
+      )}
+
+      {/* Ký tay — canvas */}
+      {signing && !signed && signingMode === 'canvas' && (
         <SignatureModal signer={signer} setSigner={setSigner} busy={busy}
-          onClose={() => setSigning(false)} onSign={doSign} />
+          onClose={() => { setSigning(false); setSigningMode(null) }} onSign={doSign} />
+      )}
+
+      {/* Ký số SmartCA */}
+      {signing && !signed && signingMode === 'smartca' && (
+        <SmartCAModal
+          commitmentId={commitment.id}
+          onClose={() => { setSigning(false); setSigningMode(null) }}
+          onSigned={() => { setSigning(false); setSigningMode(null); onRefresh() }}
+        />
       )}
     </section>
   )

@@ -2,12 +2,15 @@ import { useState } from 'react'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import Logo from '../components/Logo'
-import { LogIn, Eye, EyeOff } from 'lucide-react'
+import { LogIn, Eye, EyeOff, Building2, User } from 'lucide-react'
+
+type LoginMode = 'local' | 'ldap'
 
 export default function LoginPage() {
-  const { login } = useAuth()
+  const { login, ldapLogin } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
+  const [mode, setMode] = useState<LoginMode>('local')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPw, setShowPw] = useState(false)
@@ -17,12 +20,23 @@ export default function LoginPage() {
 
   const from = (location.state as { from?: string })?.from ?? '/'
 
+  const handleModeChange = (next: LoginMode) => {
+    setMode(next)
+    setUsername('')
+    setPassword('')
+    setError('')
+  }
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      await login(username.trim(), password, remember)
+      if (mode === 'ldap') {
+        await ldapLogin(username.trim(), password, remember)
+      } else {
+        await login(username.trim(), password, remember)
+      }
       navigate(from, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Đăng nhập thất bại.')
@@ -41,26 +55,54 @@ export default function LoginPage() {
         <h1 className="text-center text-xl font-bold text-slate-800">Đăng nhập hệ thống</h1>
         <p className="mt-1 text-center text-sm text-slate-500">Huấn luyện An toàn lao động &amp; Môi trường</p>
 
-        <form onSubmit={submit} className="mt-6 space-y-4">
-          {/* Số điện thoại / tên đăng nhập */}
+        {/* Tab chọn phương thức đăng nhập */}
+        <div className="mt-5 flex rounded-lg border border-slate-200 p-1 gap-1">
+          <button
+            type="button"
+            onClick={() => handleModeChange('local')}
+            className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 text-sm font-medium transition-colors ${
+              mode === 'local'
+                ? 'bg-vicem-500 text-white shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <User className="h-4 w-4" />
+            Tài khoản cá nhân
+          </button>
+          <button
+            type="button"
+            onClick={() => handleModeChange('ldap')}
+            className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 text-sm font-medium transition-colors ${
+              mode === 'ldap'
+                ? 'bg-vicem-500 text-white shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <Building2 className="h-4 w-4" />
+            Tài khoản công ty
+          </button>
+        </div>
+
+        <form onSubmit={submit} className="mt-5 space-y-4">
+          {/* Username — label thay đổi theo mode */}
           <div>
             <label htmlFor="username" className="block text-sm font-medium text-slate-700">
-              Số điện thoại
+              {mode === 'ldap' ? 'Tên đăng nhập (Windows)' : 'Số điện thoại'}
             </label>
             <input
               id="username"
-              type="tel"
-              inputMode="numeric"
+              type={mode === 'ldap' ? 'text' : 'tel'}
+              inputMode={mode === 'ldap' ? undefined : 'numeric'}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username tel"
-              placeholder="Nhập số điện thoại"
+              autoComplete="username"
+              placeholder={mode === 'ldap' ? 'vd: nguyen.van.a' : 'Nhập số điện thoại'}
               required
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
             />
           </div>
 
-          {/* Mật khẩu + icon con mắt */}
+          {/* Mật khẩu */}
           <div>
             <label htmlFor="password" className="block text-sm font-medium text-slate-700">
               Mật khẩu
@@ -112,12 +154,19 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="mt-5 text-center text-sm text-slate-500">
-          Chưa có tài khoản?{' '}
-          <Link to="/dang-ky" className="font-medium text-vicem-600 hover:underline">
-            Tạo tài khoản
-          </Link>
-        </p>
+        {mode === 'local' && (
+          <p className="mt-5 text-center text-sm text-slate-500">
+            Chưa có tài khoản?{' '}
+            <Link to="/dang-ky" className="font-medium text-vicem-600 hover:underline">
+              Tạo tài khoản
+            </Link>
+          </p>
+        )}
+        {mode === 'ldap' && (
+          <p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-center text-xs text-blue-700">
+            Dùng tên đăng nhập và mật khẩu Windows của bạn trong hệ thống nội bộ công ty.
+          </p>
+        )}
       </div>
     </div>
   )
