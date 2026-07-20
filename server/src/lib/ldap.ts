@@ -15,21 +15,14 @@ export interface LdapUser {
   dn: string
 }
 
-function getConfig(): LdapConfig {
+export function getConfigFromEnv(): LdapConfig | null {
   const url = process.env.LDAP_URL
   const baseDn = process.env.LDAP_BASE_DN
   const bindDn = process.env.LDAP_BIND_DN
   const bindPassword = process.env.LDAP_BIND_PASSWORD
-  if (!url || !baseDn || !bindDn || !bindPassword) {
-    throw new Error(
-      'LDAP chưa được cấu hình. Cần: LDAP_URL, LDAP_BASE_DN, LDAP_BIND_DN, LDAP_BIND_PASSWORD',
-    )
-  }
+  if (!url || !baseDn || !bindDn || !bindPassword) return null
   return {
-    url,
-    baseDn,
-    bindDn,
-    bindPassword,
+    url, baseDn, bindDn, bindPassword,
     attrUsername: process.env.LDAP_ATTR_USERNAME ?? 'sAMAccountName',
     attrFullName: process.env.LDAP_ATTR_FULLNAME ?? 'displayName',
   }
@@ -40,7 +33,6 @@ function createClient(url: string): ldap.Client {
     url,
     timeout: 5000,
     connectTimeout: 5000,
-    // Cho phép self-signed cert trong môi trường AD nội bộ
     tlsOptions: { rejectUnauthorized: false },
   })
 }
@@ -71,17 +63,13 @@ function searchAsync(
   })
 }
 
-/**
- * Xác thực người dùng qua LDAP/AD.
- *  1. Bind bằng service account → tìm DN theo sAMAccountName
- *  2. Bind lại bằng DN của user + mật khẩu user (xác thực thực sự)
- * Ném lỗi nếu user không tồn tại hoặc mật khẩu sai.
- */
-export async function authenticateLdap(username: string, password: string): Promise<LdapUser> {
-  const cfg = getConfig()
-  const sanitizedUsername = username.replace(/[*()\\\x00]/g, '') // tránh LDAP injection
+export async function authenticateLdapWithConfig(
+  cfg: LdapConfig,
+  username: string,
+  password: string,
+): Promise<LdapUser> {
+  const sanitizedUsername = username.replace(/[*()\\\x00]/g, '')
 
-  // Bước 1: service account tìm DN của user
   const svcClient = createClient(cfg.url)
   let userDn: string
   let fullName: string
@@ -98,7 +86,6 @@ export async function authenticateLdap(username: string, password: string): Prom
     }
     const entry = entries[0]
     userDn = entry.dn.toString()
-    // Truy cập attribute qua pojo (ldapjs v3)
     const attrs: Array<{ type: string; values: string[] }> =
       (entry as unknown as { pojo: { attributes: Array<{ type: string; values: string[] }> } })
         .pojo.attributes
@@ -110,7 +97,6 @@ export async function authenticateLdap(username: string, password: string): Prom
     svcClient.destroy()
   }
 
-  // Bước 2: xác thực bằng mật khẩu của chính user
   const userClient = createClient(cfg.url)
   try {
     await bindAsync(userClient, userDn, password)
@@ -121,4 +107,34 @@ export async function authenticateLdap(username: string, password: string): Prom
   }
 
   return { username: sanitizedUsername, fullName, dn: userDn }
+}
+
+/** Lấy tất cả user từ AD (dùng cho đồng bộ). */
+export async function syncUsersFromAd(cfg: LdapConfig): Promise<LdapUser[]> {
+  const client = createClient(cfg.url)
+  try {
+    await bindAsync(client, cfg.bindDn, cfg.bindPassword)
+    const entries = await searchAsync(
+      client,
+      cfg.baseDn,
+      `(&(objectClass=user)(${cfg.attrUsername}=*))`,
+      [cfg.attrUsername, cfg.attrFullName],
+    )
+    return entries.map((entry) => {
+      const attrs: Array<{ type: string; values: string[] }> =
+        (entry as unknown as { pojo: { attributes: Array<{ type: string; values: string[] }> } })
+          .pojo.attributes
+      const username = attrs.find((a) => a.type === cfg.attrUsername)?.values[0] ?? ''
+      const fullName = attrs.find((a) => a.type === cfg.attrFullName)?.values[0] ?? username
+      return { username, fullName, dn: entry.dn.toString() }
+    }).filter((u) => u.username)
+  } finally {
+    client.destroy()
+  }
+}
+
+export async function authenticateLdap(username: string, password: string): Promise<LdapUser> {
+  const cfg = getConfigFromEnv()
+  if (!cfg) throw new Error('LDAP chưa được cấu hình. Cần: LDAP_URL, LDAP_BASE_DN, LDAP_BIND_DN, LDAP_BIND_PASSWORD')
+  return authenticateLdapWithConfig(cfg, username, password)
 }

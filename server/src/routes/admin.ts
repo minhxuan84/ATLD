@@ -1,9 +1,11 @@
 import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import { query } from '../db.js'
-import { requireAuth, requireSection, requireCms, CMS_SECTIONS } from '../auth.js'
+import { requireAuth, requireSection, requireCms, CMS_SECTIONS, requireRole } from '../auth.js'
 import { escapeText } from '../util.js'
 import { generateCourse, aiAvailable } from '../ai.js'
+import { authenticateLdapWithConfig, syncUsersFromAd } from '../lib/ldap.js'
+import type { LdapConfig } from '../lib/ldap.js'
 
 export const adminRouter = Router()
 
@@ -433,4 +435,93 @@ adminRouter.put('/menu/:id', requireSection('menu'), async (req, res) => {
 adminRouter.delete('/menu/:id', requireSection('menu'), async (req, res) => {
   await query('DELETE FROM menu_items WHERE id = $1', [req.params.id])
   res.json({ ok: true })
+})
+
+// ── LDAP / Active Directory config (admin only) ──────────────────────────────
+
+const LDAP_KEYS = ['url', 'base_dn', 'bind_dn', 'bind_password', 'attr_username', 'attr_fullname', 'enabled'] as const
+
+adminRouter.get('/ldap-config', requireRole('admin'), async (_req, res) => {
+  const { rows } = await query<{ key: string; value: string }>(
+    `SELECT key, value FROM site_config WHERE key LIKE 'ldap.%'`,
+  )
+  const cfg: Record<string, string> = {}
+  for (const r of rows) cfg[r.key.replace('ldap.', '')] = r.value
+  res.json({
+    config: {
+      url: cfg.url ?? '',
+      base_dn: cfg.base_dn ?? '',
+      bind_dn: cfg.bind_dn ?? '',
+      bind_password: cfg.bind_password ?? '',
+      attr_username: cfg.attr_username ?? 'sAMAccountName',
+      attr_fullname: cfg.attr_fullname ?? 'displayName',
+      enabled: cfg.enabled === 'true',
+    },
+  })
+})
+
+adminRouter.put('/ldap-config', requireRole('admin'), async (req, res) => {
+  const b = req.body ?? {}
+  for (const k of LDAP_KEYS) {
+    const val = k === 'enabled' ? String(!!b[k]) : String(b[k] ?? '')
+    await query(
+      `INSERT INTO site_config (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [`ldap.${k}`, val],
+    )
+  }
+  res.json({ ok: true })
+})
+
+adminRouter.post('/ldap-test', requireRole('admin'), async (req, res) => {
+  const b = req.body ?? {}
+  if (!b.url || !b.bind_dn || !b.bind_password || !b.base_dn) {
+    return res.status(400).json({ ok: false, msg: 'Thiếu thông tin kết nối.' })
+  }
+  const cfg: LdapConfig = {
+    url: b.url, baseDn: b.base_dn, bindDn: b.bind_dn, bindPassword: b.bind_password,
+    attrUsername: b.attr_username || 'sAMAccountName',
+    attrFullName: b.attr_fullname || 'displayName',
+  }
+  try {
+    // Thử bind bằng service account — nếu thành công là kết nối OK
+    const ldap = await import('ldapjs')
+    const client = ldap.default.createClient({ url: cfg.url, timeout: 5000, connectTimeout: 5000, tlsOptions: { rejectUnauthorized: false } })
+    await new Promise<void>((ok, fail) => {
+      client.bind(cfg.bindDn, cfg.bindPassword, (err) => { client.destroy(); err ? fail(err) : ok() })
+    })
+    res.json({ ok: true, msg: `Kết nối thành công tới ${cfg.url}` })
+  } catch (e) {
+    res.json({ ok: false, msg: e instanceof Error ? e.message : 'Kết nối thất bại.' })
+  }
+})
+
+adminRouter.post('/ldap-sync', requireRole('admin'), async (_req, res) => {
+  const { rows } = await query<{ key: string; value: string }>(
+    `SELECT key, value FROM site_config WHERE key LIKE 'ldap.%'`,
+  )
+  const cfg: Record<string, string> = {}
+  for (const r of rows) cfg[r.key.replace('ldap.', '')] = r.value
+  if (!cfg.url || !cfg.base_dn || !cfg.bind_dn || !cfg.bind_password) {
+    return res.status(400).json({ error: 'LDAP chưa được cấu hình đầy đủ.' })
+  }
+  const ldapCfg: LdapConfig = {
+    url: cfg.url, baseDn: cfg.base_dn, bindDn: cfg.bind_dn, bindPassword: cfg.bind_password,
+    attrUsername: cfg.attr_username || 'sAMAccountName',
+    attrFullName: cfg.attr_fullname || 'displayName',
+  }
+  const users = await syncUsersFromAd(ldapCfg)
+  let added = 0, updated = 0, skipped = 0
+  for (const u of users) {
+    if (!u.username) { skipped++; continue }
+    const { rowCount } = await query(
+      `INSERT INTO atld.users (username, password_hash, full_name, role, permissions, auth_provider)
+       VALUES ($1, '', $2, 'officer', '[]', 'ldap')
+       ON CONFLICT (username) DO UPDATE
+         SET full_name = EXCLUDED.full_name, auth_provider = 'ldap'`,
+      [u.username, u.fullName],
+    )
+    if (rowCount === 1) added++; else updated++
+  }
+  res.json({ added, updated, skipped })
 })

@@ -25,6 +25,7 @@ const NewsManager = lazy(() => import('./pages/cms/NewsManager'))
 const BranchesManager = lazy(() => import('./pages/cms/BranchesManager'))
 const QuizFieldsManager = lazy(() => import('./pages/cms/QuizFieldsManager'))
 const MenuManager = lazy(() => import('./pages/cms/MenuManager'))
+const LdapConfigPage = lazy(() => import('./pages/cms/LdapConfigPage'))
 
 function Protected({ children, role }: { children: ReactNode; role?: 'admin' }) {
   const { user, loading } = useAuth()
@@ -93,6 +94,7 @@ export default function App() {
         <Route path="muc-tieu" element={<SectionGuard section="muc-tieu"><GoalsManager /></SectionGuard>} />
         <Route path="menu" element={<SectionGuard section="menu"><MenuManager /></SectionGuard>} />
         <Route path="trang-tinh" element={<SectionGuard section="trang-tinh"><SiteSettings /></SectionGuard>} />
+        <Route path="ldap" element={<LdapConfigPage />} />
       </Route>
 
       {/* Toàn bộ trang công khai */}

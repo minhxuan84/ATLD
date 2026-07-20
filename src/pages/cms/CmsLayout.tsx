@@ -6,11 +6,11 @@ import Logo from '../../components/Logo'
 import {
   LayoutDashboard, Users, GraduationCap, FileText, Newspaper, Target,
   Home, LogOut, Palette, Building2, ClipboardList, ListTree, HardHat,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Server,
 } from 'lucide-react'
 
 // section = mục quyền tương ứng; undefined = luôn hiển thị (trang tổng quan).
-const MENU: { to: string; label: string; icon: typeof Users; end?: boolean; section?: CmsSection }[] = [
+const MENU: { to: string; label: string; icon: typeof Users; end?: boolean; section?: CmsSection; adminOnly?: boolean }[] = [
   { to: '/cms', label: 'Tổng quan', icon: LayoutDashboard, end: true },
   { to: '/cms/nguoi-dung', label: 'Người dùng', icon: Users, section: 'nguoi-dung' },
   { to: '/cms/chi-nhanh', label: 'Chi nhánh / đơn vị', icon: Building2, section: 'chi-nhanh' },
@@ -22,6 +22,7 @@ const MENU: { to: string; label: string; icon: typeof Users; end?: boolean; sect
   { to: '/cms/menu', label: 'Quản lý menu', icon: ListTree, section: 'menu' },
   { to: '/cms/trang-tinh', label: 'Trang tĩnh & Nhận diện', icon: Palette, section: 'trang-tinh' },
   { to: '/cms/an-toan', label: 'ATVSLĐ / PCCN / BVMT', icon: HardHat, section: 'an-toan' },
+  { to: '/cms/ldap', label: 'Cấu hình LDAP / AD', icon: Server, adminOnly: true },
 ]
 
 export default function CmsLayout() {
@@ -35,7 +36,10 @@ export default function CmsLayout() {
   )
 
   // Chỉ hiển thị mục user có quyền (admin thấy tất cả).
-  const menu = MENU.filter((m) => !m.section || canAccess(user, m.section))
+  const menu = MENU.filter((m) => {
+    if (m.adminOnly) return user?.role === 'admin'
+    return !m.section || canAccess(user, m.section)
+  })
 
   // Trang ATVSLĐ cần full-width để bảng không bị tràn
   const isFullPage = pathname.startsWith('/cms/an-toan')
