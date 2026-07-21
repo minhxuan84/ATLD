@@ -525,3 +525,58 @@ adminRouter.post('/ldap-sync', requireRole('admin'), async (_req, res) => {
   }
   res.json({ added, updated, skipped })
 })
+
+// ── SmartCA VNPT config (admin only) ─────────────────────────────────────────
+
+const SMARTCA_KEYS = ['api_url', 'client_id', 'client_secret', 'webhook_secret', 'enabled'] as const
+
+adminRouter.get('/smartca-config', requireRole('admin'), async (_req, res) => {
+  const { rows } = await query<{ key: string; value: string }>(
+    `SELECT key, value FROM site_config WHERE key LIKE 'smartca.%'`,
+  )
+  const cfg: Record<string, string> = {}
+  for (const r of rows) cfg[r.key.replace('smartca.', '')] = r.value
+  res.json({
+    config: {
+      api_url: cfg.api_url ?? '',
+      client_id: cfg.client_id ?? '',
+      client_secret: cfg.client_secret ?? '',
+      webhook_secret: cfg.webhook_secret ?? '',
+      enabled: cfg.enabled === 'true',
+    },
+  })
+})
+
+adminRouter.put('/smartca-config', requireRole('admin'), async (req, res) => {
+  const b = req.body ?? {}
+  for (const k of SMARTCA_KEYS) {
+    const val = k === 'enabled' ? String(!!b[k]) : String(b[k] ?? '')
+    await query(
+      `INSERT INTO site_config (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [`smartca.${k}`, val],
+    )
+  }
+  res.json({ ok: true })
+})
+
+adminRouter.post('/smartca-test', requireRole('admin'), async (req, res) => {
+  const b = req.body ?? {}
+  if (!b.api_url || !b.client_id || !b.client_secret) {
+    return res.status(400).json({ ok: false, msg: 'Thiếu API URL, Client ID hoặc Client Secret.' })
+  }
+  try {
+    const r = await fetch(`${b.api_url}/auth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'client_credentials', client_id: b.client_id, client_secret: b.client_secret }),
+    })
+    if (!r.ok) {
+      const body = await r.text()
+      return res.json({ ok: false, msg: `SmartCA trả về ${r.status}: ${body.slice(0, 200)}` })
+    }
+    res.json({ ok: true, msg: `Kết nối SmartCA thành công (${b.api_url})` })
+  } catch (e) {
+    res.json({ ok: false, msg: e instanceof Error ? e.message : 'Kết nối thất bại.' })
+  }
+})

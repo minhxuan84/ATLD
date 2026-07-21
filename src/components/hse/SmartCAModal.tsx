@@ -37,7 +37,7 @@ export default function SmartCAModal({ commitmentId, onClose, onSigned }: Props)
     if (countRef.current) clearInterval(countRef.current)
   }, [])
 
-  const startPolling = (txId: string) => {
+  const startPolling = (_txId: string) => {
     // Đếm ngược
     countRef.current = setInterval(() => {
       setCountdown((c) => {
@@ -85,7 +85,12 @@ export default function SmartCAModal({ commitmentId, onClose, onSigned }: Props)
       setStep('qr')
       startPolling(r.txId)
     } catch (e) {
-      setErrMsg((e as Error).message)
+      const msg = (e as Error).message
+      setErrMsg(
+        msg.includes('503') || msg.toLowerCase().includes('chưa được kích hoạt')
+          ? 'Chữ ký số SmartCA chưa được kích hoạt. Quản trị viên vào CMS → Chữ ký số SmartCA để nhập thông tin API.'
+          : msg,
+      )
     } finally {
       setBusy(false)
     }

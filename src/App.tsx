@@ -26,6 +26,7 @@ const BranchesManager = lazy(() => import('./pages/cms/BranchesManager'))
 const QuizFieldsManager = lazy(() => import('./pages/cms/QuizFieldsManager'))
 const MenuManager = lazy(() => import('./pages/cms/MenuManager'))
 const LdapConfigPage = lazy(() => import('./pages/cms/LdapConfigPage'))
+const SmartCAConfigPage = lazy(() => import('./pages/cms/SmartCAConfigPage'))
 
 function Protected({ children, role }: { children: ReactNode; role?: 'admin' }) {
   const { user, loading } = useAuth()
@@ -95,6 +96,7 @@ export default function App() {
         <Route path="menu" element={<SectionGuard section="menu"><MenuManager /></SectionGuard>} />
         <Route path="trang-tinh" element={<SectionGuard section="trang-tinh"><SiteSettings /></SectionGuard>} />
         <Route path="ldap" element={<LdapConfigPage />} />
+        <Route path="smartca" element={<SmartCAConfigPage />} />
       </Route>
 
       {/* Toàn bộ trang công khai */}

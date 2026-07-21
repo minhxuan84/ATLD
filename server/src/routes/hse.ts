@@ -11,7 +11,7 @@ import { query } from '../db.js'
 import { requireAuth, requireSection, requireHse, siteScope } from '../auth.js'
 import type { AuthUser } from '../auth.js'
 import { buildCommitmentPdf, hashPdf } from '../lib/pdf.js'
-import { initiateSign, getSignStatus, verifyWebhookSignature } from '../lib/smartca.js'
+import { initiateSign, getSignStatus, verifyWebhookSignature, isSmartCaConfigured } from '../lib/smartca.js'
 import { escapeText, sanitizeFileName, ALLOWED_EXT, MAX_FILE_MB } from '../util.js'
 
 export const hseRouter = Router()
@@ -1665,8 +1665,8 @@ interface CommitmentRow {
 
 /** POST /hse/commitments/:id/smartca/init — Khởi tạo giao dịch ký SmartCA */
 hseRouter.post('/commitments/:id/smartca/init', ...canInspect, async (req, res) => {
-  if (!process.env.SMARTCA_API_URL) {
-    return res.status(503).json({ error: 'Chữ ký số SmartCA chưa được kích hoạt.' })
+  if (!await isSmartCaConfigured()) {
+    return res.status(503).json({ error: 'Chữ ký số SmartCA chưa được kích hoạt. Vào CMS → Chữ ký số SmartCA để cấu hình.' })
   }
   const id = Number(req.params.id)
   const b = req.body ?? {}
@@ -1712,7 +1712,7 @@ hseRouter.post('/commitments/:id/smartca/init', ...canInspect, async (req, res) 
 
 /** GET /hse/commitments/:id/smartca/status — Polling trạng thái ký */
 hseRouter.get('/commitments/:id/smartca/status', requireAuth, async (req, res) => {
-  if (!process.env.SMARTCA_API_URL) return res.status(503).json({ error: 'SmartCA chưa kích hoạt.' })
+  if (!await isSmartCaConfigured()) return res.status(503).json({ error: 'SmartCA chưa kích hoạt.' })
   const id = Number(req.params.id)
   const { rows } = await query<{ smartca_tx_id: string | null }>(
     `SELECT smartca_tx_id FROM atld.hse_commitments WHERE id = $1`, [id])
@@ -1799,10 +1799,12 @@ hseRouter.get('/gate/descriptors', requireAuth, requireHse('gate', 'inspect', 'a
   const workers = await query<{ id: number; full_name: string; descriptor: number[] }>(
     `SELECT w.id, w.full_name, w.face_descriptor AS descriptor
      FROM atld.hse_workers w
-     JOIN atld.hse_contracts c ON c.id = w.contract_id
      WHERE w.face_descriptor IS NOT NULL
        AND w.access_status = 'allowed'
-       AND ($1::boolean OR c.site_id = $2)`,
+       AND ($1::boolean OR EXISTS (
+         SELECT 1 FROM atld.hse_contract_workers cw
+         JOIN atld.hse_contracts c ON c.id = cw.contract_id
+         WHERE cw.worker_id = w.id AND c.site_id = $2))`,
     [all, siteId])
   const visitors = await query<{ id: number; full_name: string; descriptor: number[]; qr_code: string }>(
     `SELECT id, full_name, face_descriptor AS descriptor, qr_code

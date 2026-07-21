@@ -23,6 +23,7 @@ const MENU: { to: string; label: string; icon: typeof Users; end?: boolean; sect
   { to: '/cms/trang-tinh', label: 'Trang tĩnh & Nhận diện', icon: Palette, section: 'trang-tinh' },
   { to: '/cms/an-toan', label: 'ATVSLĐ / PCCN / BVMT', icon: HardHat, section: 'an-toan' },
   { to: '/cms/ldap', label: 'Cấu hình LDAP / AD', icon: Server, adminOnly: true },
+  { to: '/cms/smartca', label: 'Chữ ký số SmartCA', icon: Server, adminOnly: true },
 ]
 
 export default function CmsLayout() {

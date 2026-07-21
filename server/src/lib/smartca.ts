@@ -1,7 +1,9 @@
 /**
  * Client tích hợp SmartCA VNPT — chữ ký số cho hồ sơ ATVSLĐ/PCCN/BVMT.
  *
- * Env vars cần thiết:
+ * Cấu hình lưu trong bảng site_config (prefix smartca.*), có thể chỉnh trực tiếp
+ * trong CMS (Cấu hình → Chữ ký số SmartCA) mà không cần restart server. Nếu DB
+ * chưa có, fallback về env vars:
  *   SMARTCA_API_URL      — base URL, vd: https://api-cld.vnpt.vn/smartca
  *   SMARTCA_CLIENT_ID    — Client ID từ VNPT SmartCA developer portal
  *   SMARTCA_CLIENT_SECRET
@@ -10,6 +12,7 @@
  * Tài liệu API: https://smartca.vnpt.vn/developer
  */
 import { createHmac } from 'crypto'
+import { query } from '../db.js'
 
 export interface SmartCaConfig {
   apiUrl: string
@@ -34,21 +37,47 @@ export interface SigningResult {
   signedAt?: string        // ISO timestamp
 }
 
-function getConfig(): SmartCaConfig {
-  const apiUrl = process.env.SMARTCA_API_URL
-  const clientId = process.env.SMARTCA_CLIENT_ID
-  const clientSecret = process.env.SMARTCA_CLIENT_SECRET
-  const webhookSecret = process.env.SMARTCA_WEBHOOK_SECRET
-  if (!apiUrl || !clientId || !clientSecret || !webhookSecret) {
-    throw new Error(
-      'SmartCA chưa được cấu hình. Cần: SMARTCA_API_URL, SMARTCA_CLIENT_ID, SMARTCA_CLIENT_SECRET, SMARTCA_WEBHOOK_SECRET',
+/**
+ * Đọc cấu hình SmartCA từ DB (site_config, prefix smartca.*), fallback về env.
+ * Trả về null nếu chưa cấu hình đủ 4 trường bắt buộc.
+ */
+export async function loadSmartCaConfig(): Promise<SmartCaConfig | null> {
+  let db: Record<string, string> = {}
+  try {
+    const { rows } = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM site_config WHERE key LIKE 'smartca.%'`,
     )
+    for (const r of rows) db[r.key.replace('smartca.', '')] = r.value
+  } catch {
+    // Bảng site_config chưa sẵn sàng — chỉ dùng env.
   }
+  // DB chỉ được dùng khi được bật (smartca.enabled = 'true'); ngược lại thử env.
+  const enabled = db.enabled === 'true'
+  const apiUrl = (enabled && db.api_url) || process.env.SMARTCA_API_URL
+  const clientId = (enabled && db.client_id) || process.env.SMARTCA_CLIENT_ID
+  const clientSecret = (enabled && db.client_secret) || process.env.SMARTCA_CLIENT_SECRET
+  const webhookSecret = (enabled && db.webhook_secret) || process.env.SMARTCA_WEBHOOK_SECRET
+  if (!apiUrl || !clientId || !clientSecret || !webhookSecret) return null
   return { apiUrl, clientId, clientSecret, webhookSecret }
 }
 
+/** true nếu SmartCA đã cấu hình đủ (DB hoặc env) — dùng để gác các route ký. */
+export async function isSmartCaConfigured(): Promise<boolean> {
+  return (await loadSmartCaConfig()) !== null
+}
+
+async function getConfig(): Promise<SmartCaConfig> {
+  const cfg = await loadSmartCaConfig()
+  if (!cfg) {
+    throw new Error(
+      'SmartCA chưa được cấu hình. Vào CMS → Chữ ký số SmartCA để nhập API URL, Client ID, Client Secret và Webhook Secret.',
+    )
+  }
+  return cfg
+}
+
 /** Lấy access token bằng client credentials (OAuth2). */
-async function getAccessToken(cfg: SmartCaConfig): Promise<string> {
+async function getAccessTokenFor(cfg: SmartCaConfig): Promise<string> {
   const res = await fetch(`${cfg.apiUrl}/auth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -77,8 +106,8 @@ export async function initiateSign(
   documentName: string,
   callbackUrl: string,
 ): Promise<SigningTransaction> {
-  const cfg = getConfig()
-  const token = await getAccessToken(cfg)
+  const cfg = await getConfig()
+  const token = await getAccessTokenFor(cfg)
 
   const res = await fetch(`${cfg.apiUrl}/v1/sign/request`, {
     method: 'POST',
@@ -114,8 +143,8 @@ export async function initiateSign(
 
 /** Lấy trạng thái giao dịch ký (polling từ frontend). */
 export async function getSignStatus(txId: string): Promise<SigningResult> {
-  const cfg = getConfig()
-  const token = await getAccessToken(cfg)
+  const cfg = await getConfig()
+  const token = await getAccessTokenFor(cfg)
 
   const res = await fetch(`${cfg.apiUrl}/v1/sign/status/${encodeURIComponent(txId)}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -145,12 +174,12 @@ export async function getSignStatus(txId: string): Promise<SigningResult> {
  * Xác minh HMAC của webhook callback từ VNPT SmartCA.
  * VNPT ký header X-SmartCA-Signature bằng HMAC-SHA256(body, webhookSecret).
  */
-export function verifyWebhookSignature(rawBody: string, signature: string): boolean {
-  const cfg = getConfig()
+export async function verifyWebhookSignature(rawBody: string, signature: string): Promise<boolean> {
+  const cfg = await loadSmartCaConfig()
+  if (!cfg) return false
   const expected = createHmac('sha256', cfg.webhookSecret)
     .update(rawBody, 'utf8')
     .digest('hex')
-  // So sánh constant-time để tránh timing attack
   if (expected.length !== signature.length) return false
   let diff = 0
   for (let i = 0; i < expected.length; i++) {
