@@ -74,6 +74,56 @@ export async function checkWorkerTraining(workTypeId: number, workerIds: number[
     ok: courses.rows.length === 0 || (results.length > 0 && results.every((w) => w.ok)) }
 }
 
+export interface TrainingRecord {
+  course_id: string; course_title: string; grp: string | null
+  passed: boolean; quiz_score: number | null; pass_score: number
+  cert_id: string | null; completed_at: string | null
+  expires_at: string | null; validity_months: number | null
+  status: 'valid' | 'expired' | 'not_passed' | 'in_progress'
+  days_left: number | null
+}
+
+// Lịch sử huấn luyện ATLĐ của một NLĐ — toàn bộ khóa đã học, không giới hạn loại công việc.
+// Nối qua CCCD như checkWorkerTraining (ưu tiên trainee_info rồi users.id_number) vì
+// NLĐ nhà thầu học bằng tài khoản nào thì hồ sơ vẫn phải gom về đúng người.
+export async function getWorkerTrainingHistory(
+  workerId: number,
+  runQuery: typeof query = query,
+): Promise<TrainingRecord[]> {
+  const r = await runQuery<{
+    course_id: string; course_title: string; grp: string | null
+    passed: boolean; quiz_score: number | null; pass_score: number
+    cert_id: string | null; completed_at: string | null
+    expires_at: string | null; validity_months: number | null
+    days_left: number | null
+  }>(
+    `SELECT c.id AS course_id, c.title AS course_title, c.grp, c.pass_score,
+            c.validity_months,
+            p.passed, p.quiz_score, p.cert_id, p.completed_at, p.expires_at,
+            (p.expires_at - CURRENT_DATE) AS days_left
+     FROM atld.hse_workers w
+     JOIN atld.progress p ON true
+     JOIN atld.users u ON u.id = p.user_id
+     JOIN atld.courses c ON c.id = p.course_id
+     WHERE w.id = $1
+       AND ${identitySql('w.id_number')} IS NOT NULL
+       AND COALESCE(${identitySql("p.trainee_info->>'cccd'")},
+                    ${identitySql("p.trainee_info->>'id_number'")},
+                    ${identitySql('u.id_number')}) = ${identitySql('w.id_number')}
+     ORDER BY p.passed DESC, p.completed_at DESC NULLS LAST, c.title`,
+    [workerId],
+  )
+  return r.rows.map((x) => ({
+    ...x,
+    status: !x.passed
+      ? (x.quiz_score == null ? 'in_progress' : 'not_passed')
+      : x.expires_at != null && Number(x.days_left) < 0
+        ? 'expired'
+        : 'valid',
+    days_left: x.expires_at == null ? null : Number(x.days_left),
+  }))
+}
+
 export async function checkContractTraining(contractId: number, workTypeId: number, runQuery: typeof query = query): Promise<TrainingCheck> {
   const workers = await runQuery<{ worker_id: number }>(
     `SELECT worker_id FROM atld.hse_contract_workers WHERE contract_id = $1`, [contractId])

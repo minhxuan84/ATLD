@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
-import { Plus, Trash2, ChevronDown, ChevronRight, Check, Pencil, X, Award, Sparkles, Loader2 } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, Pencil, X, Award, Sparkles, Loader2, Video } from 'lucide-react'
 
 interface CourseRow {
   id: string
@@ -14,6 +14,7 @@ interface CourseRow {
   summary: string[]
   pass_score: number
   question_count: number
+  validity_months: number | null
 }
 interface QuestionRow {
   id: number
@@ -33,6 +34,24 @@ type QuestionDraft = { text: string; options: string[]; correct_index: number }
 
 const emptyQuestion = (): QuestionDraft => ({ text: '', options: ['', '', '', ''], correct_index: 0 })
 
+/** Biểu tượng một bước trong thanh tiến trình AI sinh nội dung */
+function AiStepBadge({ label, status }: { label: string; status: 'waiting' | 'running' | 'done' | 'error' }) {
+  return (
+    <div className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+      status === 'done'    ? 'bg-emerald-100 text-emerald-700' :
+      status === 'running' ? 'bg-vicem-100 text-vicem-700' :
+      status === 'error'   ? 'bg-red-100 text-red-600' :
+                             'bg-slate-100 text-slate-400'
+    }`}>
+      {status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
+      {status === 'done'    && <Check   className="h-3 w-3" />}
+      {status === 'error'   && <X       className="h-3 w-3" />}
+      {status === 'waiting' && <span className="inline-block h-2 w-2 rounded-full bg-slate-300" />}
+      {label}
+    </div>
+  )
+}
+
 export default function CoursesManager() {
   const [courses, setCourses] = useState<CourseRow[]>([])
   const [branches, setBranches] = useState<Branch[]>([])
@@ -42,17 +61,22 @@ export default function CoursesManager() {
   const [showNew, setShowNew] = useState(false)
   const [error, setError] = useState('')
 
-  const [newCourse, setNewCourse] = useState({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, summary: '' })
+  const [newCourse, setNewCourse] = useState({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', summary: '' })
   const [newQ, setNewQ] = useState<QuestionDraft>(emptyQuestion())
 
   // AI sinh nội dung khóa học từ prompt
   const [aiTopic, setAiTopic] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [aiQuestions, setAiQuestions] = useState<QuestionDraft[]>([])
+  // Cấu hình + theo dõi tiến trình AI
+  const [aiQuestionCount, setAiQuestionCount] = useState(8)
+  const [aiStep, setAiStep] = useState<null | 'content' | 'quiz' | 'video' | 'done' | 'error'>(null)
+  const [aiVideoJobId, setAiVideoJobId] = useState<string | null>(null)
+  const [aiFrameImageUrl, setAiFrameImageUrl] = useState('')
 
   // Sửa khóa học
   const [editCourse, setEditCourse] = useState<string | null>(null)
-  const [courseDraft, setCourseDraft] = useState({ title: '', description: '', grp: '', branch_id: '', video_url: '', duration: '', pass_score: 80, summary: '' })
+  const [courseDraft, setCourseDraft] = useState({ title: '', description: '', grp: '', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', summary: '' })
   // Sửa câu hỏi
   const [editQ, setEditQ] = useState<number | null>(null)
   const [qDraft, setQDraft] = useState<QuestionDraft>(emptyQuestion())
@@ -62,6 +86,22 @@ export default function CoursesManager() {
     api<{ branches: Branch[] }>('/admin/branches').then((d) => setBranches(d.branches)).catch(() => {})
   }, [])
   useEffect(fetchCourses, [fetchCourses])
+
+  // Polling trạng thái job video (mỗi 5 giây) khi AI đang render video
+  useEffect(() => {
+    if (!aiVideoJobId || aiStep !== 'video') return
+    const interval = setInterval(async () => {
+      try {
+        const s = await api<{ status: string; videoUrl: string | null }>(`/admin/videos/${aiVideoJobId}/status`)
+        if (s.status === 'done') {
+          if (s.videoUrl) setNewCourse(c => ({ ...c, video_url: s.videoUrl! }))
+          setAiStep('done'); clearInterval(interval)
+        }
+        if (s.status === 'error') { setAiStep('error'); clearInterval(interval) }
+      } catch { /* bỏ qua lỗi mạng tạm thời */ }
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [aiVideoJobId, aiStep])
 
   const reloadQuestions = async (courseId: string) => {
     const d = await api<{ questions: QuestionRow[] }>(`/admin/courses/${courseId}/questions`)
@@ -97,9 +137,12 @@ export default function CoursesManager() {
         })
       }
       setShowNew(false)
-      setNewCourse({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, summary: '' })
+      setNewCourse({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', summary: '' })
       setAiQuestions([])
       setAiTopic('')
+      setAiStep(null)
+      setAiVideoJobId(null)
+      setAiFrameImageUrl('')
       fetchCourses()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Tạo khóa học thất bại.')
@@ -109,28 +152,54 @@ export default function CoursesManager() {
   // Gọi AI sinh nội dung, tự điền vào form (giữ mã khóa học admin đã nhập)
   const aiGenerate = async () => {
     if (aiTopic.trim().length < 3) { setError('Nhập chủ đề để AI soạn nội dung.'); return }
-    setAiLoading(true); setError('')
+    setAiLoading(true); setAiStep('content'); setAiVideoJobId(null); setError('')
     try {
-      const { course } = await api<{ course: {
-        title: string; description: string; grp: string; duration: string
-        summary: string[]; questions: QuestionDraft[]
-      } }>('/admin/courses/ai-generate', { method: 'POST', body: { topic: aiTopic } })
+      const { course } = await api<{
+        course: { title: string; description: string; grp: string; duration: string; summary: string[]; questions: QuestionDraft[] }
+      }>('/admin/courses/ai-generate', { method: 'POST', body: { topic: aiTopic, questionCount: aiQuestionCount } })
       setNewCourse((c) => ({
         ...c,
         title: course.title, description: course.description, grp: course.grp || c.grp,
         duration: course.duration, summary: course.summary.join('\n'),
       }))
       setAiQuestions(course.questions ?? [])
+      // Nội dung sẵn sàng → chờ admin xem lại trước khi tạo video
+      setAiStep('quiz')
     } catch (err) {
+      setAiStep('error')
       setError(err instanceof Error ? err.message : 'AI sinh nội dung thất bại.')
     } finally { setAiLoading(false) }
+  }
+
+  // Khởi động job tạo video sau khi admin đã kiểm tra nội dung
+  const startVideoRender = async () => {
+    try {
+      const { jobId } = await api<{ jobId: string }>('/admin/videos/create', {
+        method: 'POST',
+        body: {
+          topic: aiTopic,
+          imageUrl: aiFrameImageUrl.trim() || null,
+          course: {
+            title: newCourse.title, description: newCourse.description, grp: newCourse.grp,
+            duration: newCourse.duration, summary: newCourse.summary.split('\n').filter((s) => s.trim()),
+            questions: [],
+          },
+        },
+      })
+      setAiVideoJobId(jobId); setAiStep('video')
+    } catch (err) {
+      setAiStep('error')
+      setError(err instanceof Error ? err.message : 'Không thể khởi động tạo video.')
+    }
   }
 
   const startEditCourse = (c: CourseRow) => {
     setEditCourse(c.id)
     setCourseDraft({
       title: c.title, description: c.description, grp: c.grp, branch_id: c.branch_id ? String(c.branch_id) : '',
-      video_url: c.video_url, duration: c.duration, pass_score: c.pass_score, summary: (c.summary ?? []).join('\n'),
+      video_url: c.video_url, duration: c.duration, pass_score: c.pass_score,
+      validity_months: c.validity_months == null ? '' : String(c.validity_months),
+      summary: (c.summary ?? []).join('\n'),
     })
   }
   const saveCourse = async (id: string) => {
@@ -190,29 +259,122 @@ export default function CoursesManager() {
       {showNew && (
         <form onSubmit={createCourse} className="mt-4 grid gap-3 rounded-2xl border border-slate-200 bg-white p-5 sm:grid-cols-2">
           {/* ── Khu vực AI sinh nội dung ── */}
-          <div className="sm:col-span-2 flex gap-2 rounded-xl bg-vicem-50 p-3 items-start">
-            <Sparkles className="mt-2 h-5 w-5 shrink-0 text-vicem-600" aria-hidden />
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-vicem-800">Tạo nội dung bằng AI</p>
-              <p className="text-xs text-vicem-600 mb-2">Nhập chủ đề, AI sẽ tự soạn tên, mô tả, tóm tắt và câu hỏi trắc nghiệm.</p>
-              <div className="flex gap-2">
-                <input
-                  value={aiTopic}
-                  onChange={(e) => setAiTopic(e.target.value)}
-                  placeholder="Vd: An toàn khi làm việc trên cao, Phòng chống cháy nổ…"
-                  className="flex-1 rounded-lg border border-vicem-200 bg-white px-3 py-1.5 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
-                />
-                <button
-                  type="button" onClick={aiGenerate} disabled={aiLoading}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-vicem-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-vicem-700 disabled:opacity-60"
-                >
-                  {aiLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  {aiLoading ? 'Đang tạo…' : 'Sinh nội dung'}
-                </button>
+          <div className="sm:col-span-2 rounded-xl bg-vicem-50 p-3">
+            <div className="flex items-start gap-2">
+              <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-vicem-600" aria-hidden />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-vicem-800">Tạo nội dung bằng AI</p>
+                <p className="text-xs text-vicem-600 mb-2">Nhập chủ đề, AI sẽ soạn nội dung, câu hỏi và khởi động render video tự động.</p>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    value={aiTopic}
+                    onChange={(e) => setAiTopic(e.target.value)}
+                    placeholder="Vd: An toàn khi làm việc trên cao, Phòng chống cháy nổ…"
+                    className="min-w-0 flex-1 rounded-lg border border-vicem-200 bg-white px-3 py-1.5 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
+                  />
+                  {/* Cấu hình số câu hỏi */}
+                  <div className="flex items-center gap-1.5 rounded-lg border border-vicem-200 bg-white px-2.5 py-1.5">
+                    <label htmlFor="ai-q-count" className="text-xs text-slate-500 whitespace-nowrap">Số câu hỏi</label>
+                    <input
+                      id="ai-q-count" type="number" min={3} max={20}
+                      value={aiQuestionCount}
+                      onChange={(e) => setAiQuestionCount(Math.max(3, Math.min(20, Number(e.target.value) || 8)))}
+                      className="w-12 rounded border border-slate-200 px-1 py-0.5 text-center text-sm font-semibold text-vicem-700 focus:border-vicem-400 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="button" onClick={aiGenerate} disabled={aiLoading}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-vicem-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-vicem-700 disabled:opacity-60"
+                  >
+                    {aiLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                    {aiLoading ? 'Đang xử lý…' : 'Sinh nội dung'}
+                  </button>
+                </div>
+
+                {/* Thanh tiến trình 3 bước */}
+                {aiStep !== null && (
+                  <div className="mt-3 flex flex-wrap items-center gap-1">
+                    <AiStepBadge
+                      label="Soạn nội dung"
+                      status={
+                        aiStep === 'content' ? 'running' :
+                        aiStep === 'error' && !aiVideoJobId ? 'error' : 'done'
+                      }
+                    />
+                    <div className="h-px w-4 shrink-0 bg-slate-200" />
+                    <AiStepBadge
+                      label={`${aiQuestions.length > 0 ? aiQuestions.length : aiQuestionCount} câu hỏi`}
+                      status={
+                        aiStep === 'content' ? 'waiting' :
+                        aiStep === 'error' && !aiVideoJobId ? 'error' : 'done'
+                      }
+                    />
+                    <div className="h-px w-4 shrink-0 bg-slate-200" />
+                    <AiStepBadge
+                      label="Video clip"
+                      status={
+                        aiStep === 'content' || aiStep === 'quiz' ? 'waiting' :
+                        aiStep === 'video' ? 'running' :
+                        aiStep === 'done' ? 'done' :
+                        aiStep === 'error' ? 'error' : 'waiting'
+                      }
+                    />
+                    {aiStep === 'quiz' && (
+                      <span className="ml-1 text-xs italic text-sky-600">↓ xem lại bên dưới</span>
+                    )}
+                    {aiStep === 'video' && (
+                      <span className="ml-1 text-xs italic text-slate-400">đang render…</span>
+                    )}
+                    {aiStep === 'done' && (
+                      <span className="ml-1 text-xs font-medium text-emerald-600">✓ Hoàn tất</span>
+                    )}
+                    {aiStep === 'error' && (
+                      <span className="ml-1 text-xs text-red-600">Có lỗi — thử lại.</span>
+                    )}
+                  </div>
+                )}
+
+                {/* Panel xem lại nội dung — xuất hiện sau khi AI sinh xong, chờ admin xác nhận tạo video */}
+                {aiStep === 'quiz' && (
+                  <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3">
+                    <p className="text-sm font-semibold text-sky-800">Xem lại nội dung trước khi tạo video</p>
+                    <div className="mt-2 space-y-1 text-xs text-slate-600">
+                      <div><span className="font-medium">Tiêu đề:</span> {newCourse.title}</div>
+                      <div><span className="font-medium">Mô tả:</span> {newCourse.description}</div>
+                      <div>
+                        <span className="font-medium">Tóm tắt:</span>{' '}
+                        {newCourse.summary.split('\n').filter((s) => s.trim()).length} ý ·{' '}
+                        <span className="font-medium">Câu hỏi:</span> {aiQuestions.length} câu
+                      </div>
+                    </div>
+                    {/* Cấu hình ảnh bìa (frame) cho video — tùy chọn */}
+                    <div className="mt-3">
+                      <input
+                        value={aiFrameImageUrl}
+                        onChange={(e) => setAiFrameImageUrl(e.target.value)}
+                        placeholder="URL ảnh bìa video (tùy chọn — để trống dùng nền màu mặc định)"
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-sky-400 focus:ring-1 focus:ring-sky-100"
+                      />
+                    </div>
+                    <div className="mt-2 flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={startVideoRender}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-vicem-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-vicem-700"
+                      >
+                        <Video className="h-3.5 w-3.5" /> Tạo video
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAiStep('done')}
+                        className="text-xs text-slate-500 underline hover:text-slate-700"
+                      >
+                        Bỏ qua video
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-              {aiQuestions.length > 0 && (
-                <p className="mt-1.5 text-xs text-emerald-700">✓ AI đã soạn {aiQuestions.length} câu hỏi — sẽ được lưu tự động khi tạo khóa học.</p>
-              )}
             </div>
           </div>
 
@@ -226,6 +388,9 @@ export default function CoursesManager() {
           <input value={newCourse.duration} onChange={(e) => setNewCourse({ ...newCourse, duration: e.target.value })} placeholder="Thời lượng (vd: 25 phút)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
           <input value={newCourse.video_url} onChange={(e) => setNewCourse({ ...newCourse, video_url: e.target.value })} placeholder="URL video nhúng (embed)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           <input type="number" value={newCourse.pass_score} onChange={(e) => setNewCourse({ ...newCourse, pass_score: Number(e.target.value) })} placeholder="Điểm đạt (%)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          {/* Để trống = chứng chỉ không hết hạn. Hạn tính từ ngày đạt, dùng cho cảnh báo
+              và cho đối chiếu khóa học JSA khi kiểm tra ATMT. */}
+          <input type="number" min={0} value={newCourse.validity_months} onChange={(e) => setNewCourse({ ...newCourse, validity_months: e.target.value })} placeholder="Thời hạn chứng chỉ (tháng, trống = vô hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
           <textarea value={newCourse.description} onChange={(e) => setNewCourse({ ...newCourse, description: e.target.value })} placeholder="Mô tả" rows={2} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           <textarea value={newCourse.summary} onChange={(e) => setNewCourse({ ...newCourse, summary: e.target.value })} placeholder="Tóm tắt nội dung (mỗi dòng 1 ý)" rows={3} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           {error && <p className="text-sm text-red-600 sm:col-span-2">{error}</p>}
@@ -262,6 +427,7 @@ export default function CoursesManager() {
                   </select>
                   <input value={courseDraft.duration} onChange={(e) => setCourseDraft({ ...courseDraft, duration: e.target.value })} placeholder="Thời lượng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
                   <input type="number" value={courseDraft.pass_score} onChange={(e) => setCourseDraft({ ...courseDraft, pass_score: Number(e.target.value) })} placeholder="Điểm đạt (%)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                  <input type="number" min={0} value={courseDraft.validity_months} onChange={(e) => setCourseDraft({ ...courseDraft, validity_months: e.target.value })} placeholder="Thời hạn chứng chỉ (tháng, trống = vô hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
                   <input value={courseDraft.video_url} onChange={(e) => setCourseDraft({ ...courseDraft, video_url: e.target.value })} placeholder="URL video nhúng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <textarea value={courseDraft.description} onChange={(e) => setCourseDraft({ ...courseDraft, description: e.target.value })} placeholder="Mô tả" rows={2} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <textarea value={courseDraft.summary} onChange={(e) => setCourseDraft({ ...courseDraft, summary: e.target.value })} placeholder="Tóm tắt nội dung (mỗi dòng 1 ý)" rows={3} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />

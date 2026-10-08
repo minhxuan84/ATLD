@@ -8,7 +8,7 @@ export const coursesRouter = Router()
 coursesRouter.get('/', requireAuth, async (req, res) => {
   const courses = await query(
     `SELECT c.id, c.title, c.description, c.grp, c.branch_id, b.name AS branch_name,
-            c.video_url, c.duration, c.summary, c.pass_score,
+            c.video_url, c.duration, c.summary, c.pass_score, c.validity_months,
             (SELECT count(*)::int FROM questions q WHERE q.course_id = c.id) AS question_count
      FROM courses c
      LEFT JOIN branches b ON b.id = c.branch_id
@@ -35,22 +35,50 @@ coursesRouter.get('/meta/quiz-fields', requireAuth, async (_req, res) => {
 // Chi tiết khóa học — KHÔNG trả correct_index để tránh lộ đáp án
 coursesRouter.get('/:id', requireAuth, async (req, res) => {
   const { rows } = await query(
-    `SELECT id, title, description, grp, video_url, duration, summary, pass_score
+    `SELECT id, title, description, grp, video_url, duration, summary, pass_score,
+            questions_per_attempt, validity_months, randomize_options
      FROM courses WHERE id = $1`,
     [req.params.id],
   )
   const course = rows[0]
   if (!course) return res.status(404).json({ error: 'Không tìm thấy khóa học.' })
 
-  const questions = await query(
+  // Lấy tất cả câu hỏi (để biết tổng số)
+  const allQuestions = await query<{ id: number; text: string; options: string[] }>(
     'SELECT id, text, options FROM questions WHERE course_id = $1 ORDER BY sort_order, id',
     [req.params.id],
   )
+
+  // Nếu questions_per_attempt > 0 thì rút ngẫu nhiên, ngược lại trả hết
+  const questionsPerAttempt = course.questions_per_attempt || 0
+  let selectedQuestions = allQuestions.rows
+
+  if (questionsPerAttempt > 0 && allQuestions.rows.length > questionsPerAttempt) {
+    // Rút ngẫu nhiên N câu
+    const shuffled = [...allQuestions.rows].sort(() => Math.random() - 0.5)
+    selectedQuestions = shuffled.slice(0, questionsPerAttempt)
+  }
+
+  // Nếu randomize_options = true thì xáo trộn thứ tự options (chỉ UI, correct_index không trả về)
+  if (course.randomize_options) {
+    selectedQuestions = selectedQuestions.map((q) => ({
+      ...q,
+      options: [...q.options].sort(() => Math.random() - 0.5),
+    }))
+  }
+
   const progress = await query(
-    'SELECT step, quiz_score, passed, cert_id, completed_at FROM progress WHERE user_id = $1 AND course_id = $2',
+    `SELECT step, quiz_score, passed, cert_id, completed_at, expires_at
+     FROM progress WHERE user_id = $1 AND course_id = $2`,
     [req.user!.id, req.params.id],
   )
-  res.json({ course, questions: questions.rows, progress: progress.rows[0] ?? null })
+
+  res.json({
+    course,
+    questions: selectedQuestions,
+    questionIds: selectedQuestions.map((q) => q.id), // Để client gửi lại khi submit
+    progress: progress.rows[0] ?? null,
+  })
 })
 
 // Cập nhật bước hiện tại (điều hướng 3 bước)
@@ -68,6 +96,7 @@ coursesRouter.post('/:id/step', requireAuth, async (req, res) => {
 // Nộp bài trắc nghiệm — CHẤM ĐIỂM & CẤP CHỨNG CHỈ PHÍA SERVER
 coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
   const answers = req.body?.answers as Record<string, number> | undefined
+  const questionIds = req.body?.questionIds as number[] | undefined // Câu hỏi được phát cho attempt này
   if (!answers || typeof answers !== 'object') {
     return res.status(400).json({ error: 'Thiếu bài làm.' })
   }
@@ -89,16 +118,19 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     }
     if (value) traineeInfo[f.field_key] = value
   }
-  const courseRes = await query<{ pass_score: number; title: string }>(
-    'SELECT pass_score, title FROM courses WHERE id = $1',
+  const courseRes = await query<{ pass_score: number; title: string; validity_months: number | null }>(
+    'SELECT pass_score, title, validity_months FROM courses WHERE id = $1',
     [courseId],
   )
   const course = courseRes.rows[0]
   if (!course) return res.status(404).json({ error: 'Không tìm thấy khóa học.' })
 
+  // Nếu có questionIds (đề ngẫu nhiên) thì chỉ chấm bộ đó, ngược lại chấm toàn bộ
   const qres = await query<{ id: number; correct_index: number }>(
-    'SELECT id, correct_index FROM questions WHERE course_id = $1',
-    [courseId],
+    questionIds && questionIds.length > 0
+      ? `SELECT id, correct_index FROM questions WHERE course_id = $1 AND id = ANY($2::int[])`
+      : 'SELECT id, correct_index FROM questions WHERE course_id = $1',
+    questionIds && questionIds.length > 0 ? [courseId, questionIds] : [courseId],
   )
   const total = qres.rows.length
   if (total === 0) return res.status(400).json({ error: 'Khóa học chưa có câu hỏi.' })
@@ -108,18 +140,44 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     0,
   )
   const score = Math.round((correct / total) * 100)
-  const passed = score >= course.pass_score
+  const passScore = Math.max(0, Math.min(100, course.pass_score)) // Clamp 0–100
+  const passed = score >= passScore
   const certId = passed ? `ATLD-${courseId.toUpperCase()}-${Date.now().toString().slice(-6)}` : null
 
+  // Tính expires_at nếu passed và có validity_months
+  const expiresAt =
+    passed && course.validity_months
+      ? new Date(Date.now() + course.validity_months * 30.44 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10)
+      : null
+
+  // Lưu attempt vào quiz_attempts
   await query(
-    `INSERT INTO progress (user_id, course_id, step, quiz_score, passed, cert_id, trainee_info, completed_at)
-     VALUES ($1, $2, 3, $3, $4, $5, $6, CASE WHEN $4 THEN now() ELSE NULL END)
-     ON CONFLICT (user_id, course_id) DO UPDATE
-       SET quiz_score = EXCLUDED.quiz_score, passed = EXCLUDED.passed,
-           cert_id = EXCLUDED.cert_id, trainee_info = EXCLUDED.trainee_info,
-           completed_at = EXCLUDED.completed_at, updated_at = now()`,
-    [req.user!.id, courseId, score, passed, certId, JSON.stringify(traineeInfo)],
+    `INSERT INTO atld.quiz_attempts (user_id, course_id, question_ids, answers, score, passed, submitted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, now())`,
+    [req.user!.id, courseId, JSON.stringify(questionIds || []), JSON.stringify(answers), score, passed],
   )
+
+  // Cập nhật progress: chỉ ghi đè khi passed hoặc chưa có passed trước đó
+  // (tránh xóa lần đạt cũ khi thi lại trượt)
+  const currentProgress = await query<{ passed: boolean }>(
+    'SELECT passed FROM progress WHERE user_id = $1 AND course_id = $2',
+    [req.user!.id, courseId],
+  )
+  const shouldUpdate = passed || !currentProgress.rows[0]?.passed
+
+  if (shouldUpdate) {
+    await query(
+      `INSERT INTO progress (user_id, course_id, step, quiz_score, passed, cert_id, trainee_info, completed_at, expires_at)
+       VALUES ($1, $2, 3, $3, $4, $5, $6, CASE WHEN $4 THEN now() ELSE NULL END, $7)
+       ON CONFLICT (user_id, course_id) DO UPDATE
+         SET quiz_score = EXCLUDED.quiz_score, passed = EXCLUDED.passed,
+             cert_id = EXCLUDED.cert_id, trainee_info = EXCLUDED.trainee_info,
+             completed_at = EXCLUDED.completed_at, expires_at = EXCLUDED.expires_at, updated_at = now()`,
+      [req.user!.id, courseId, score, passed, certId, JSON.stringify(traineeInfo), expiresAt],
+    )
+  }
 
   // Tên trên chứng chỉ ưu tiên họ tên khai báo, không có thì dùng tên tài khoản
   const traineeName = traineeInfo.full_name || req.user!.fullName
@@ -127,7 +185,7 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
   res.json({
     score,
     passed,
-    passScore: course.pass_score,
+    passScore,
     certificate: passed
       ? {
           certId,
@@ -135,7 +193,21 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
           courseTitle: course.title,
           score,
           date: new Date().toLocaleDateString('vi-VN'),
+          expiresAt,
         }
       : null,
   })
+})
+
+// Lịch sử thi của user hiện tại cho một khóa học
+coursesRouter.get('/:id/attempts', requireAuth, async (req, res) => {
+  const attempts = await query(
+    `SELECT id, question_ids, score, passed, started_at, submitted_at
+     FROM atld.quiz_attempts
+     WHERE user_id = $1 AND course_id = $2
+     ORDER BY submitted_at DESC NULLS LAST, started_at DESC
+     LIMIT 20`,
+    [req.user!.id, req.params.id],
+  )
+  res.json({ attempts: attempts.rows })
 })

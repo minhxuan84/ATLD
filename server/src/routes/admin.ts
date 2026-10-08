@@ -3,7 +3,8 @@ import bcrypt from 'bcryptjs'
 import { query } from '../db.js'
 import { requireAuth, requireSection, requireCms, CMS_SECTIONS, requireRole } from '../auth.js'
 import { escapeText } from '../util.js'
-import { generateCourse, aiAvailable } from '../ai.js'
+import { generateCourse, aiAvailable, buildVideoScript, type GeneratedCourse } from '../ai.js'
+import { createJob, getJob, spawnVideoJob } from '../video.js'
 import { authenticateLdapWithConfig, syncUsersFromAd } from '../lib/ldap.js'
 import type { LdapConfig } from '../lib/ldap.js'
 
@@ -132,14 +133,17 @@ adminRouter.delete('/users/:id', requireSection('nguoi-dung'), async (req, res) 
 
 // ---- Khóa học ----
 // AI sinh nội dung khóa học từ chủ đề (prompt). Trả bản nháp để duyệt, KHÔNG tự lưu.
+// Video KHÔNG tự khởi động — admin xem lại nội dung rồi bấm "Tạo video" (POST /videos/create).
 adminRouter.post('/courses/ai-generate', requireSection('khoa-hoc'), async (req, res) => {
   if (!aiAvailable()) {
-    return res.status(503).json({ error: 'Chưa cấu hình ANTHROPIC_API_KEY trên máy chủ.' })
+    return res.status(503).json({ error: 'Chưa cấu hình AI (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL) trên máy chủ.' })
   }
   const topic = String(req.body?.topic ?? '').trim().slice(0, 500)
   if (topic.length < 3) return res.status(400).json({ error: 'Vui lòng nhập chủ đề (tối thiểu 3 ký tự).' })
+  // Số câu hỏi admin cấu hình (3–20, mặc định 8)
+  const questionCount = Math.max(3, Math.min(20, Number(req.body?.questionCount ?? 8) || 8))
   try {
-    const course = await generateCourse(topic)
+    const course = await generateCourse(topic, questionCount)
     if (!course.questions.length) return res.status(422).json({ error: 'AI chưa tạo được câu hỏi hợp lệ, thử lại với chủ đề rõ hơn.' })
     res.json({ course })
   } catch (err) {
@@ -156,12 +160,17 @@ adminRouter.post('/courses', requireSection('khoa-hoc'), async (req, res) => {
 
   const b = req.body
   const branchId = b.branch_id ? Number(b.branch_id) : null
+  const passScore = Math.max(0, Math.min(100, Number(b.pass_score) || 80))
   await query(
-    `INSERT INTO courses (id, title, description, grp, branch_id, video_url, duration, summary, pass_score, sort_order)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    `INSERT INTO courses (id, title, description, grp, branch_id, video_url, duration, summary, pass_score, sort_order,
+                          questions_per_attempt, validity_months, randomize_options)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
     [id, String(b.title ?? '').slice(0, 200), String(b.description ?? ''), String(b.grp ?? ''), branchId,
      String(b.video_url ?? ''), String(b.duration ?? ''), JSON.stringify(Array.isArray(b.summary) ? b.summary : []),
-     Number(b.pass_score) || 80, Number(b.sort_order) || 0],
+     passScore, Number(b.sort_order) || 0,
+     Number(b.questions_per_attempt) || 0,
+     b.validity_months ? Number(b.validity_months) : null,
+     Boolean(b.randomize_options)],
   )
   res.status(201).json({ id })
 })
@@ -169,12 +178,24 @@ adminRouter.post('/courses', requireSection('khoa-hoc'), async (req, res) => {
 adminRouter.put('/courses/:id', requireSection('khoa-hoc'), async (req, res) => {
   const b = req.body
   const branchId = b.branch_id ? Number(b.branch_id) : null
+  const passScore = Math.max(0, Math.min(100, Number(b.pass_score) || 80))
+  // Form CMS không gửi questions_per_attempt/randomize_options → nếu ghi thẳng thì mỗi
+  // lần sửa khóa học sẽ xóa luôn cấu hình rút đề. COALESCE giữ giá trị cũ khi thiếu khóa.
+  const qpa = b.questions_per_attempt === undefined ? null : Number(b.questions_per_attempt) || 0
+  const randomize = b.randomize_options === undefined ? null : Boolean(b.randomize_options)
   await query(
-    `UPDATE courses SET title=$1, description=$2, grp=$3, branch_id=$4, video_url=$5, duration=$6, summary=$7, pass_score=$8
-     WHERE id=$9`,
+    `UPDATE courses SET title=$1, description=$2, grp=$3, branch_id=$4, video_url=$5, duration=$6, summary=$7, pass_score=$8,
+                        questions_per_attempt=COALESCE($9, questions_per_attempt),
+                        validity_months=$10,
+                        randomize_options=COALESCE($11, randomize_options)
+     WHERE id=$12`,
     [String(b.title ?? '').slice(0, 200), String(b.description ?? ''), String(b.grp ?? ''), branchId,
      String(b.video_url ?? ''), String(b.duration ?? ''), JSON.stringify(Array.isArray(b.summary) ? b.summary : []),
-     Number(b.pass_score) || 80, req.params.id],
+     passScore,
+     qpa,
+     b.validity_months ? Number(b.validity_months) : null,
+     randomize,
+     req.params.id],
   )
   res.json({ ok: true })
 })
@@ -510,7 +531,13 @@ adminRouter.post('/ldap-sync', requireRole('admin'), async (_req, res) => {
     attrUsername: cfg.attr_username || 'sAMAccountName',
     attrFullName: cfg.attr_fullname || 'displayName',
   }
-  const users = await syncUsersFromAd(ldapCfg)
+  let users
+  try {
+    users = await syncUsersFromAd(ldapCfg)
+  } catch (e) {
+    return res.status(502).json({ error: `Lỗi truy vấn AD: ${e instanceof Error ? e.message : 'không rõ'}` })
+  }
+  const found = users.length
   let added = 0, updated = 0, skipped = 0
   for (const u of users) {
     if (!u.username) { skipped++; continue }
@@ -523,7 +550,12 @@ adminRouter.post('/ldap-sync', requireRole('admin'), async (_req, res) => {
     )
     if (rowCount === 1) added++; else updated++
   }
-  res.json({ added, updated, skipped })
+  // found = số entry AD trả về. found=0 thường do sai 'Thuộc tính tên đăng nhập'
+  // (phải là sAMAccountName) hoặc Base DN không chứa tài khoản nào.
+  const hint = found === 0
+    ? 'Không tìm thấy tài khoản nào trong AD. Kiểm tra "Thuộc tính tên đăng nhập" (nên là sAMAccountName) và Base DN.'
+    : undefined
+  res.json({ added, updated, skipped, found, hint, attrUsername: ldapCfg.attrUsername })
 })
 
 // ── SmartCA VNPT config (admin only) ─────────────────────────────────────────
@@ -578,5 +610,64 @@ adminRouter.post('/smartca-test', requireRole('admin'), async (req, res) => {
     res.json({ ok: true, msg: `Kết nối SmartCA thành công (${b.api_url})` })
   } catch (e) {
     res.json({ ok: false, msg: e instanceof Error ? e.message : 'Kết nối thất bại.' })
+  }
+})
+
+// ── Video jobs (auto-video-gen) ───────────────────────────────────────────────
+
+/** GET /api/admin/videos/:jobId/status — poll trạng thái job tạo video */
+adminRouter.get('/videos/:jobId/status', requireSection('khoa-hoc'), (req, res) => {
+  const job = getJob(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Job không tồn tại (có thể đã reset sau khi restart server).' })
+  res.json({
+    jobId: job.jobId,
+    status: job.status,          // 'pending' | 'running' | 'done' | 'error'
+    topic: job.topic,
+    createdAt: job.createdAt,
+    videoUrl: job.status === 'done'
+      ? `/uploads/videos/${job.jobId}/video.mp4`
+      : null,
+    error: job.error ?? null,
+  })
+})
+
+/** GET /api/admin/videos/:jobId/file — download video.mp4 khi job 'done' */
+adminRouter.get('/videos/:jobId/file', requireSection('khoa-hoc'), (req, res) => {
+  const job = getJob(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Job không tồn tại.' })
+  if (job.status !== 'done' || !job.videoPath) {
+    return res.status(409).json({ error: `Video chưa sẵn sàng (trạng thái: ${job.status}).` })
+  }
+  res.download(job.videoPath, `video-${job.jobId.slice(0, 8)}.mp4`)
+})
+
+/** POST /api/admin/videos/create — khởi động job tạo video từ nội dung admin đã kiểm tra */
+adminRouter.post('/videos/create', requireSection('khoa-hoc'), async (req, res) => {
+  const topic = String(req.body?.topic ?? '').trim().slice(0, 500)
+  if (topic.length < 3) return res.status(400).json({ error: 'Thiếu chủ đề.' })
+  const courseData = req.body?.course as Partial<GeneratedCourse> | undefined
+  if (!courseData?.title) return res.status(400).json({ error: 'Thiếu dữ liệu khóa học (course.title).' })
+  // Validate imageUrl — phải là URL tuyệt đối hợp lệ hoặc null
+  let imageUrl: string | null = null
+  const rawImage = req.body?.imageUrl ? String(req.body.imageUrl).trim() : ''
+  if (rawImage) {
+    try { new URL(rawImage); imageUrl = rawImage } catch { /* URL không hợp lệ — bỏ qua */ }
+  }
+  const course: GeneratedCourse = {
+    title: String(courseData.title ?? '').slice(0, 200),
+    description: String(courseData.description ?? ''),
+    grp: String(courseData.grp ?? 'Nhóm 4'),
+    duration: String(courseData.duration ?? ''),
+    summary: Array.isArray(courseData.summary) ? courseData.summary.map(String) : [],
+    questions: [], // không cần câu hỏi để build script video
+  }
+  try {
+    const script = buildVideoScript(course, topic, imageUrl)
+    const jobId = createJob(topic)
+    await spawnVideoJob(jobId, script)
+    res.json({ jobId })
+  } catch (err) {
+    console.error('[videos/create]', (err as Error).message)
+    res.status(500).json({ error: 'Không thể khởi động job tạo video.' })
   }
 })
