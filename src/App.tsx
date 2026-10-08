@@ -8,6 +8,7 @@ import type { CmsSection } from './types'
 const HomePage = lazy(() => import('./pages/HomePage'))
 const LoginPage = lazy(() => import('./pages/LoginPage'))
 const RegisterPage = lazy(() => import('./pages/RegisterPage'))
+const OAuthCallbackPage = lazy(() => import('./pages/OAuthCallbackPage'))
 const TrainingListPage = lazy(() => import('./pages/TrainingListPage'))
 const TrainingDetailPage = lazy(() => import('./pages/TrainingDetailPage'))
 const DocumentsPage = lazy(() => import('./pages/DocumentsPage'))
@@ -62,6 +63,7 @@ function PublicShell() {
         <Routes>
           <Route path="/dang-nhap" element={<LoginPage />} />
           <Route path="/dang-ky" element={<RegisterPage />} />
+          <Route path="/oauth/callback" element={<OAuthCallbackPage />} />
           <Route path="/tin-tuc" element={<NewsPage />} />
           <Route path="/tin-tuc/:id" element={<NewsDetailPage />} />
           <Route path="/huan-luyen" element={<Protected><TrainingListPage /></Protected>} />

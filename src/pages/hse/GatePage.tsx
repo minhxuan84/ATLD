@@ -106,6 +106,11 @@ export default function GatePage({ embedded = false }: Props) {
   // ── Chế độ nhận diện khuôn mặt ──────────────────────────────────
   const [faceMode, setFaceMode] = useState(false)
   const [faceStatus, setFaceStatus] = useState<'loading' | 'scanning'>('loading')
+  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment')
+  // Số khuôn mặt đã đăng ký và số lần quét không khớp — để báo cho bảo vệ biết
+  // đang xảy ra chuyện gì, thay vì để màn hình quay vô hạn không phản hồi.
+  const [faceCandidateCount, setFaceCandidateCount] = useState(0)
+  const [faceNoMatch, setFaceNoMatch] = useState(0)
   const faceVideoRef = useRef<HTMLVideoElement>(null)
   const faceStreamRef = useRef<MediaStream | null>(null)
   const faceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -280,9 +285,18 @@ export default function GatePage({ embedded = false }: Props) {
         ])
         if (cancelled) return
         const candidates: GateFaceCandidate[] = [...descData.workers, ...descData.visitors]
+        setFaceCandidateCount(candidates.length)
+        setFaceNoMatch(0)
+        // Chưa ai đăng ký khuôn mặt thì có quét cũng không khớp được — nói luôn
+        // thay vì mở camera rồi quay mãi.
+        if (!candidates.length) {
+          setFaceMode(false)
+          setErr('Chưa có khuôn mặt nào được đăng ký. Vào mục Người lao động / Khách để đăng ký ảnh mặt trước khi dùng nhận diện.')
+          return
+        }
 
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } },
+          video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
         })
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return }
         faceStreamRef.current = stream
@@ -295,7 +309,9 @@ export default function GatePage({ embedded = false }: Props) {
           const detection = await detectFaceWithBox(faceVideoRef.current).catch(() => null)
           if (!detection || cancelled) return
           const match = matchFace(detection.descriptor, candidates)
-          if (!match) return
+          // Thấy mặt nhưng không khớp ai: đếm để hiện gợi ý tra tay, không tự tắt
+          // camera vì người đứng chưa ngay ngắn cũng rơi vào nhánh này.
+          if (!match) { setFaceNoMatch((n) => n + 1); return }
 
           clearInterval(faceIntervalRef.current!)
           faceIntervalRef.current = null
@@ -325,7 +341,7 @@ export default function GatePage({ embedded = false }: Props) {
       faceStreamRef.current?.getTracks().forEach((t) => t.stop())
       faceStreamRef.current = null
     }
-  }, [faceMode, search, lookupVisitor])
+  }, [faceMode, facingMode, search, lookupVisitor])
 
   const allowed = !!selected && selected.eligible && selected.access_status !== 'suspended'
 
@@ -398,10 +414,23 @@ export default function GatePage({ embedded = false }: Props) {
             </div>
           )}
           {faceStatus === 'scanning' && (
-            <div className="absolute bottom-3 left-0 right-0 flex justify-center">
-              <span className="rounded-full bg-black/60 px-3 py-1 text-xs text-white">Đang nhận diện khuôn mặt…</span>
+            <div className="absolute bottom-3 left-0 right-0 flex flex-col items-center gap-1.5 px-3">
+              <span className="rounded-full bg-black/60 px-3 py-1 text-xs text-white">
+                Đang nhận diện khuôn mặt… ({faceCandidateCount} người đã đăng ký)
+              </span>
+              {/* Quét quá ~8 giây (10 nhịp × 800 ms) mà không khớp: gợi ý tra tay
+                  để bảo vệ không mắc kẹt chờ camera. */}
+              {faceNoMatch >= 10 && (
+                <span className="rounded-lg bg-amber-500/90 px-3 py-1.5 text-center text-xs font-medium text-white">
+                  Chưa khớp được ai. Nhìn thẳng, đủ sáng, bỏ khẩu trang — hoặc nhập tên/CCCD để tra tay.
+                </span>
+              )}
             </div>
           )}
+          <button
+            onClick={() => setFacingMode((f) => f === 'environment' ? 'user' : 'environment')}
+            className="absolute left-2 top-2 rounded-lg bg-black/50 px-2.5 py-1 text-sm font-bold text-white hover:bg-black/70"
+          >🔄</button>
           <button
             onClick={() => setFaceMode(false)}
             className="absolute right-2 top-2 rounded-lg bg-black/50 px-2.5 py-1 text-sm font-bold text-white hover:bg-black/70"

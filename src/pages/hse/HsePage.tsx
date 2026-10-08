@@ -15,6 +15,9 @@ const VisitorsPage = lazy(() => import('./VisitorsPage'))
 const EvaluationsPage = lazy(() => import('./EvaluationsPage'))
 const DashboardPage = lazy(() => import('./DashboardPage'))
 const DocTypesConfigPage = lazy(() => import('./DocTypesConfigPage'))
+const JsaConfigPage = lazy(() => import('./JsaConfigPage'))
+const PermitsPage = lazy(() => import('./PermitsPage'))
+const AuditLogPage = lazy(() => import('./AuditLogPage'))
 
 export default function HsePage() {
   const { user } = useAuth()
@@ -32,7 +35,10 @@ export default function HsePage() {
     { to: 'danh-gia', label: 'Đánh giá định kỳ', show: canHse(user, 'inspect', 'approve') },
     { to: 'kiem-tra', label: 'Kiểm tra ATMT', show: canHse(user, 'inspect', 'approve') },
     { to: 'dinh-chi', label: 'Đình chỉ công việc', show: canHse(user, 'approve') },
+    { to: 'giay-phep', label: 'Giấy phép làm việc', show: canHse(user, 'inspect', 'approve') },
     { to: 'cong', label: 'Cổng kiểm soát', show: canHse(user, 'gate', 'inspect', 'approve') },
+    { to: 'cong-viec', label: 'Danh mục công việc', show: isHseAdmin },
+    { to: 'nhat-ky', label: 'Nhật ký hoạt động', show: isHseAdmin },
     { to: 'cau-hinh', label: 'Cấu hình hồ sơ', show: isHseAdmin },
   ].filter((t) => t.show)
   return (
@@ -66,7 +72,10 @@ export default function HsePage() {
           <Route path="danh-gia" element={<EvaluationsPage />} />
           <Route path="kiem-tra" element={<InspectionsPage />} />
           <Route path="dinh-chi" element={<SuspensionsPage />} />
+          <Route path="giay-phep" element={<PermitsPage />} />
           <Route path="cong" element={<GatePage embedded />} />
+          <Route path="cong-viec" element={<JsaConfigPage />} />
+          <Route path="nhat-ky" element={<AuditLogPage />} />
           <Route path="cau-hinh" element={<DocTypesConfigPage />} />
         </Routes>
       </Suspense>

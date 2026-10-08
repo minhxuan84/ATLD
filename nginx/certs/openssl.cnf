@@ -10,12 +10,14 @@ C  = VN
 ST = Kien Giang
 L  = Ha Tien
 O  = VICEM Ha Tien
-CN = 172.16.7.246
+CN = atld.vicemhatien.com.vn
 
 [v3_req]
 subjectAltName = @alt_names
 
 [alt_names]
-IP.1 = 172.16.7.246
+IP.1 = 172.16.1.246
 IP.2 = 127.0.0.1
 DNS.1 = localhost
+DNS.2 = atld.vicemhatien.com.vn
+DNS.3 = *.vicemhatien.com.vn

@@ -134,15 +134,24 @@ export default function TrainingDetailPage() {
           <div>
             <h2 className="text-lg font-semibold text-slate-800">Bước 1 · Xem video huấn luyện</h2>
             <div className="mt-4 aspect-video w-full overflow-hidden rounded-lg bg-black">
-              <iframe
-                className="h-full w-full"
-                src={toEmbedUrl(course.video_url)}
-                title={`Video huấn luyện: ${course.title}`}
-                loading="lazy"
-                referrerPolicy="strict-origin-when-cross-origin"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
+              {course.video_url.startsWith('/') ? (
+                <video
+                  className="h-full w-full"
+                  src={course.video_url}
+                  controls
+                  title={`Video huấn luyện: ${course.title}`}
+                />
+              ) : (
+                <iframe
+                  className="h-full w-full"
+                  src={toEmbedUrl(course.video_url)}
+                  title={`Video huấn luyện: ${course.title}`}
+                  loading="lazy"
+                  referrerPolicy="strict-origin-when-cross-origin"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              )}
             </div>
             <div className="mt-5 flex justify-end">
               <button onClick={() => goStep(2)} className="inline-flex items-center gap-2 rounded-lg bg-vicem-600 px-5 py-2.5 font-semibold text-white hover:bg-vicem-700">

@@ -173,6 +173,7 @@ export async function getSignStatus(txId: string): Promise<SigningResult> {
 /**
  * Xác minh HMAC của webhook callback từ VNPT SmartCA.
  * VNPT ký header X-SmartCA-Signature bằng HMAC-SHA256(body, webhookSecret).
+ * Dùng constant-time comparison để tránh timing attack.
  */
 export async function verifyWebhookSignature(rawBody: string, signature: string): Promise<boolean> {
   const cfg = await loadSmartCaConfig()
@@ -180,10 +181,11 @@ export async function verifyWebhookSignature(rawBody: string, signature: string)
   const expected = createHmac('sha256', cfg.webhookSecret)
     .update(rawBody, 'utf8')
     .digest('hex')
-  if (expected.length !== signature.length) return false
-  let diff = 0
-  for (let i = 0; i < expected.length; i++) {
-    diff |= expected.charCodeAt(i) ^ signature.charCodeAt(i)
+  // Constant-time compare: không early-return theo độ dài (rò rỉ thông tin).
+  const maxLen = Math.max(expected.length, signature.length)
+  let diff = expected.length ^ signature.length
+  for (let i = 0; i < maxLen; i++) {
+    diff |= (expected.charCodeAt(i) || 0) ^ (signature.charCodeAt(i) || 0)
   }
   return diff === 0
 }

@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs'
 import rateLimit from 'express-rate-limit'
 import { query } from '../db.js'
 import { signToken, requireAuth, type Role, type AuthUser } from '../auth.js'
-import { authenticateLdap } from '../lib/ldap.js'
+import { authenticateLdapWithConfig, getConfigFromDb, getConfigFromEnv, type LdapUser } from '../lib/ldap.js'
 
 export const authRouter = Router()
 
@@ -35,7 +35,7 @@ interface UserRow {
 }
 
 authRouter.post('/login', loginLimiter, async (req, res) => {
-  const { username, password } = req.body ?? {}
+  const { username, password, remember } = req.body ?? {}
   if (typeof username !== 'string' || typeof password !== 'string') {
     return res.status(400).json({ error: 'Thiếu tên đăng nhập hoặc mật khẩu.' })
   }
@@ -51,7 +51,7 @@ authRouter.post('/login', loginLimiter, async (req, res) => {
     permissions: (Array.isArray(user.permissions) ? user.permissions : []) as AuthUser['permissions'],
     siteId: user.site_id ?? null,
   }
-  const token = signToken(authUser)
+  const token = signToken(authUser, remember === true)
   res.json({ token, user: authUser })
 })
 
@@ -74,19 +74,20 @@ const ldapLimiter = rateLimit({
  * Khi thành công, upsert user vào atld.users (lần đầu: role=officer) rồi trả JWT giống local login.
  */
 authRouter.post('/ldap-login', ldapLimiter, async (req, res) => {
-  const { username, password } = req.body ?? {}
+  const { username, password, remember } = req.body ?? {}
   if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
     return res.status(400).json({ error: 'Thiếu tên đăng nhập hoặc mật khẩu.' })
   }
 
-  // Kiểm tra LDAP có được cấu hình không
-  if (!process.env.LDAP_URL) {
+  // Kiểm tra LDAP có được cấu hình & bật không (ưu tiên cấu hình trong DB từ trang quản trị)
+  const cfg = (await getConfigFromDb()) ?? getConfigFromEnv()
+  if (!cfg) {
     return res.status(503).json({ error: 'Đăng nhập tài khoản công ty chưa được kích hoạt.' })
   }
 
-  let ldapUser: Awaited<ReturnType<typeof authenticateLdap>>
+  let ldapUser: LdapUser
   try {
-    ldapUser = await authenticateLdap(username.trim(), password)
+    ldapUser = await authenticateLdapWithConfig(cfg, username.trim(), password)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Xác thực thất bại.'
     // Không phân biệt "user không tồn tại" hay "sai mật khẩu" để tránh user enumeration
@@ -115,7 +116,7 @@ authRouter.post('/ldap-login', ldapLimiter, async (req, res) => {
     permissions: (Array.isArray(user.permissions) ? user.permissions : []) as AuthUser['permissions'],
     siteId: user.site_id ?? null,
   }
-  const token = signToken(authUser)
+  const token = signToken(authUser, remember === true)
   res.json({ token, user: authUser })
 })
 

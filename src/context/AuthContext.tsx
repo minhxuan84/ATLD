@@ -41,6 +41,8 @@ interface AuthState {
   login: (username: string, password: string, remember?: boolean) => Promise<void>
   ldapLogin: (username: string, password: string, remember?: boolean) => Promise<void>
   logout: () => void
+  /** Dùng cho OAuth callback: set user sau khi token đã được lưu từ bên ngoài */
+  setUserFromToken: (user: AuthUser) => void
 }
 
 const AuthContext = createContext<AuthState | null>(null)
@@ -65,7 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (username: string, password: string, remember = true) => {
     const d = await api<{ token: string; user: AuthUser }>('/auth/login', {
       method: 'POST',
-      body: { username, password },
+      body: { username, password, remember },
     })
     setToken(d.token, remember)
     setUser(d.user)
@@ -74,7 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const ldapLogin = async (username: string, password: string, remember = true) => {
     const d = await api<{ token: string; user: AuthUser }>('/auth/ldap-login', {
       method: 'POST',
-      body: { username, password },
+      body: { username, password, remember },
     })
     setToken(d.token, remember)
     setUser(d.user)
@@ -85,7 +87,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }
 
-  return <AuthContext.Provider value={{ user, loading, login, ldapLogin, logout }}>{children}</AuthContext.Provider>
+  const setUserFromToken = (u: AuthUser) => setUser(u)
+
+  return <AuthContext.Provider value={{ user, loading, login, ldapLogin, logout, setUserFromToken }}>{children}</AuthContext.Provider>
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

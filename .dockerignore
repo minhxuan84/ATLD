@@ -1,6 +1,7 @@
 # Dependencies
 node_modules
 server/node_modules
+auto-video-gen/node_modules
 
 # Build outputs
 dist
@@ -14,8 +15,11 @@ server/dist
 # Environment (không đóng gói secret vào image; truyền qua env_file lúc chạy)
 .env
 .env.local
+.env.*.local
 .env.docker
 server/.env
+auto-video-gen/.env.local
+auto-video-gen/.env.*.local
 
 # Docker
 Dockerfile

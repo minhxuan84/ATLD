@@ -30,3 +30,11 @@ _test.txt
 # Env chứa API key TTS/AI của auto-video-gen
 auto-video-gen/.env.local
 auto-video-gen/.env.*.local
+
+# auto-video-gen là clone riêng của github.com/Cuongyd196/auto-video-gen (có .git riêng).
+# Commit vào đây chỉ tạo gitlink rỗng chứ không mang theo file; DEV nhận qua tarball
+# của deploy-dev.mjs (chỉ loại trừ node_modules/.git) nên không cần track.
+auto-video-gen/
+
+# File PDF sinh ra khi thử buildCommitmentPdf, không có mã nào tham chiếu
+_g.pdf

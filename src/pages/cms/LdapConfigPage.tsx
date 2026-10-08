@@ -17,7 +17,7 @@ const EMPTY: LdapCfg = {
   attr_username: 'sAMAccountName', attr_fullname: 'displayName', enabled: false,
 }
 
-interface SyncResult { added: number; updated: number; skipped: number }
+interface SyncResult { added: number; updated: number; skipped: number; found?: number; hint?: string; attrUsername?: string }
 
 export default function LdapConfigPage() {
   const [form, setForm] = useState<LdapCfg>(EMPTY)
@@ -196,9 +196,12 @@ export default function LdapConfigPage() {
           <p className="mt-2 text-xs text-slate-400">Cần kích hoạt AD/SSO trước khi đồng bộ.</p>
         )}
         {syncResult && (
-          <div className="mt-3 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-800">
+          <div className={`mt-3 rounded-lg px-4 py-3 text-sm ${syncResult.hint ? 'bg-amber-50 text-amber-800' : 'bg-blue-50 text-blue-800'}`}>
             <p className="font-semibold">Đồng bộ hoàn tất</p>
-            <p>Thêm mới: <strong>{syncResult.added}</strong> · Cập nhật: <strong>{syncResult.updated}</strong> · Bỏ qua: <strong>{syncResult.skipped}</strong></p>
+            <p>
+              Tìm thấy: <strong>{syncResult.found ?? '—'}</strong> · Thêm mới: <strong>{syncResult.added}</strong> · Cập nhật: <strong>{syncResult.updated}</strong> · Bỏ qua: <strong>{syncResult.skipped}</strong>
+            </p>
+            {syncResult.hint && <p className="mt-1">{syncResult.hint}</p>}
           </div>
         )}
       </div>
