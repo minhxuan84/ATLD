@@ -1,10 +1,16 @@
 // Quản lý nhà thầu + hợp đồng gắn với từng nhà thầu.
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api, openFileInNewTab, downloadFile } from '../../lib/api'
-import { useAuth, seesAllSites } from '../../context/AuthContext'
+import { useAuth, seesAllSites, canHse } from '../../context/AuthContext'
 import { fmtDate } from '../../lib/date'
 
 interface Branch { id: number; name: string; location: string }
+
+interface ContractWorker {
+  id: number; full_name: string; id_number: string | null; job_title: string | null
+  contractor_id: number; contractor_name: string
+  access_status?: string; assigned_at?: string
+}
 
 interface Contractor {
   id: number; code: string; name: string; tax_id: string | null
@@ -236,6 +242,11 @@ function ContractPanel({ contractor, contracts, onReload }: {
   const [uploadFor, setUploadFor] = useState<number | null>(null)
   const [uploadBusy, setUploadBusy] = useState<number | null>(null)
 
+  // Khai báo NLĐ vào hợp đồng — trục nối mà engine xét điều kiện và đối chiếu
+  // khóa học JSA đều dựa vào.
+  const canAssign = canHse(user, 'inspect', 'approve')
+  const [workersFor, setWorkersFor] = useState<Contract | null>(null)
+
   // Xuất báo cáo hồ sơ kiểm soát an toàn (Excel) cho từng hợp đồng.
   const [reportBusy, setReportBusy] = useState<number | null>(null)
   const exportReport = async (c: Contract) => {
@@ -355,6 +366,12 @@ function ContractPanel({ contractor, contracts, onReload }: {
                 )}
               </td>
               <td className="py-2 pr-1 text-right whitespace-nowrap">
+                {canAssign && (
+                  <button onClick={() => setWorkersFor(c)} title="Khai báo người lao động vào hợp đồng"
+                    className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-vicem-500">
+                    👷
+                  </button>
+                )}
                 <button onClick={() => exportReport(c)} disabled={reportBusy === c.id}
                   title="Xuất báo cáo hồ sơ kiểm soát an toàn (Excel)"
                   className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-green-600 disabled:opacity-50">
@@ -382,6 +399,11 @@ function ContractPanel({ contractor, contracts, onReload }: {
         </ModalWrap>
       )}
 
+      {/* Modal Khai báo NLĐ vào hợp đồng */}
+      {workersFor && (
+        <ContractWorkersModal contract={workersFor} onClose={() => setWorkersFor(null)} />
+      )}
+
       {/* Modal Sửa HĐ */}
       {editTarget && (
         <ModalWrap onClose={() => setEditTarget(null)} title={`Sửa HĐ ${editTarget.contract_no}`}>
@@ -406,6 +428,152 @@ function ContractPanel({ contractor, contracts, onReload }: {
         </ModalWrap>
       )}
     </section>
+  )
+}
+
+// ── Khai báo NLĐ vào hợp đồng ─────────────────────────────────────
+// Cho phép gán chéo nhà thầu: nhà thầu chính thường điều động NLĐ của nhà thầu phụ,
+// nên danh sách chọn không giới hạn theo contractor_id của hợp đồng — cột "Nhà thầu"
+// hiển thị rõ NLĐ thuộc đơn vị nào.
+function ContractWorkersModal({ contract, onClose }: { contract: Contract; onClose: () => void }) {
+  const [assigned, setAssigned] = useState<ContractWorker[]>([])
+  const [available, setAvailable] = useState<ContractWorker[]>([])
+  const [picked, setPicked] = useState<Set<number>>(new Set())
+  const [q, setQ] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  const loadAssigned = useCallback(async () => {
+    const d = await api<{ workers: ContractWorker[] }>(`/hse/contracts/${contract.id}/workers`)
+    setAssigned(d.workers)
+  }, [contract.id])
+
+  // Tìm kiếm có debounce để không gọi API theo từng ký tự.
+  useEffect(() => {
+    let active = true
+    const timer = setTimeout(async () => {
+      try {
+        const d = await api<{ workers: ContractWorker[] }>(
+          `/hse/contracts/${contract.id}/available-workers?q=${encodeURIComponent(q)}`)
+        if (active) setAvailable(d.workers)
+      } catch (e) { if (active) setErr((e as Error).message) }
+    }, q ? 300 : 0)
+    return () => { active = false; clearTimeout(timer) }
+  }, [contract.id, q, assigned])
+
+  useEffect(() => {
+    loadAssigned().catch((e) => setErr((e as Error).message)).finally(() => setLoading(false))
+  }, [loadAssigned])
+
+  const toggle = (id: number) => {
+    const next = new Set(picked)
+    next.has(id) ? next.delete(id) : next.add(id)
+    setPicked(next)
+  }
+
+  const submit = async () => {
+    if (!picked.size) return
+    setErr(''); setBusy(true)
+    try {
+      await api(`/hse/contracts/${contract.id}/workers`,
+        { method: 'POST', body: { worker_ids: [...picked] } })
+      setPicked(new Set()); setQ('')
+      await loadAssigned()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+
+  const remove = async (w: ContractWorker) => {
+    if (!confirm(`Bỏ ${w.full_name} khỏi hợp đồng ${contract.contract_no}?`)) return
+    setErr('')
+    try {
+      await api(`/hse/contracts/${contract.id}/workers/${w.id}`, { method: 'DELETE' })
+      await loadAssigned()
+    } catch (e) { setErr((e as Error).message) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg bg-white p-5"
+        onClick={(e) => e.stopPropagation()}>
+        <h3 className="mb-1 text-lg font-semibold">Người lao động — HĐ {contract.contract_no}</h3>
+        <p className="mb-3 text-xs text-slate-400">
+          Danh sách này là căn cứ xét điều kiện hồ sơ, đối chiếu khóa học JSA khi kiểm tra ATMT
+          và chặn ra/vào khi đình chỉ hợp đồng.
+        </p>
+        {err && <ErrBox msg={err} />}
+
+        <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-2">
+          {/* Đã khai báo */}
+          <section className="flex min-h-0 flex-col">
+            <p className="mb-1 text-xs font-medium text-slate-500">
+              Đã khai báo ({assigned.length})
+            </p>
+            <ul className="min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto rounded border border-slate-200">
+              {loading ? (
+                <li className="p-3 text-sm text-slate-400">Đang tải…</li>
+              ) : assigned.length === 0 ? (
+                <li className="p-3 text-sm text-slate-400">Chưa khai báo NLĐ nào.</li>
+              ) : assigned.map((w) => (
+                <li key={w.id} className="group flex items-center gap-2 px-2 py-1.5 text-sm hover:bg-slate-50">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-slate-800">{w.full_name}</span>
+                    <span className="text-xs text-slate-400">
+                      {w.id_number || 'chưa có CCCD'}
+                      {w.contractor_id !== contract.contractor_id ? ` · ${w.contractor_name}` : ''}
+                    </span>
+                  </span>
+                  <button onClick={() => remove(w)} title="Bỏ khỏi hợp đồng"
+                    className="shrink-0 rounded p-1 text-slate-300 opacity-0 hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100">
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          {/* Chọn thêm */}
+          <section className="flex min-h-0 flex-col">
+            <p className="mb-1 text-xs font-medium text-slate-500">Chọn thêm</p>
+            <input value={q} onChange={(e) => setQ(e.target.value)}
+              placeholder="Tìm theo tên / CCCD…"
+              className="mb-1 w-full rounded border border-slate-300 px-3 py-1.5 text-sm" />
+            <ul className="min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto rounded border border-slate-200">
+              {available.length === 0 ? (
+                <li className="p-3 text-sm text-slate-400">
+                  {q ? 'Không tìm thấy NLĐ phù hợp.' : 'Mọi NLĐ đã được khai báo.'}
+                </li>
+              ) : available.map((w) => (
+                <li key={w.id}>
+                  <label className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-sm hover:bg-slate-50">
+                    <input type="checkbox" checked={picked.has(w.id)} onChange={() => toggle(w.id)}
+                      className="shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-slate-800">{w.full_name}</span>
+                      <span className="text-xs text-slate-400">
+                        {w.id_number || 'chưa có CCCD'} · {w.contractor_name}
+                        {w.job_title ? ` · ${w.job_title}` : ''}
+                      </span>
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </div>
+
+        <div className="mt-4 flex items-center justify-end gap-2">
+          {picked.size > 0 && (
+            <span className="mr-auto text-xs text-slate-500">Đã chọn {picked.size} người</span>
+          )}
+          <button onClick={onClose} className="rounded px-3 py-1.5 text-sm text-slate-500">Đóng</button>
+          <button onClick={submit} disabled={busy || !picked.size}
+            className="rounded bg-vicem-500 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50">
+            {busy ? 'Đang lưu…' : 'Khai báo'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

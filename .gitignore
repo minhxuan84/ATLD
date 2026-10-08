@@ -16,8 +16,17 @@ upload-dev.mjs
 restore-db-dev.mjs
 fix-docker-perm.mjs
 check-server.mjs
+dev-exec.mjs
+push-proxy.mjs
+atld-create-admin.mjs
+atld-restore-script.js
+atld-backup-db.sh
 _rebuild.mjs
 _upload.mjs
 _ssh_diag_tmp.js
 _test.txt
 .claude/
+
+# Env chứa API key TTS/AI của auto-video-gen
+auto-video-gen/.env.local
+auto-video-gen/.env.*.local

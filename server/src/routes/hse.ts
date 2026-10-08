@@ -7,7 +7,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import ExcelJS from 'exceljs'
 import { query } from '../db.js'
-import { requireAuth, requireSection, requireHse, siteScope } from '../auth.js'
+import { requireAuth, requireSection, requireHse, siteScope, type AuthUser } from '../auth.js'
 import { buildCommitmentPdf, hashPdf } from '../lib/pdf.js'
 import { initiateSign, getSignStatus, verifyWebhookSignature, isSmartCaConfigured } from '../lib/smartca.js'
 import { escapeText, sanitizeFileName } from '../util.js'
@@ -271,6 +271,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
     await query(`ALTER TABLE atld.hse_workers ADD COLUMN IF NOT EXISTS presence VARCHAR(10) NOT NULL DEFAULT 'out'`)
     await query(`ALTER TABLE atld.hse_workers ADD COLUMN IF NOT EXISTS last_in_at TIMESTAMPTZ`)
     await query(`ALTER TABLE atld.hse_workers ADD COLUMN IF NOT EXISTS last_out_at TIMESTAMPTZ`)
+    // Lý do bị chặn ra/vào do syncWorkerAccess/syncEquipmentAccess ghi. Cột này
+    // được code ghi từ trước nhưng chưa có migration nào tạo → mọi lần sync đều lỗi 42703.
+    await query(`ALTER TABLE atld.hse_workers ADD COLUMN IF NOT EXISTS access_block_reason TEXT`)
+    await query(`ALTER TABLE atld.hse_equipments ADD COLUMN IF NOT EXISTS access_block_reason TEXT`)
 
     // hse_doc_types: bổ sung cấu hình động (kích hoạt, nhóm hiển thị, chức danh áp dụng, mức rủi ro)
     await query(`ALTER TABLE atld.hse_doc_types ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true`)
@@ -933,6 +937,86 @@ hseRouter.get('/contracts/:id/file', requireAuth, async (req, res) => {
   const filePath = path.join(UPLOAD_DIR, r.rows[0].contract_stored_name)
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Tệp không còn trên máy chủ.' })
   res.download(filePath, r.rows[0].contract_file_name ?? 'hop-dong.pdf')
+})
+
+// ═══════════════ KHAI BÁO NLĐ VÀO HỢP ĐỒNG ═══════════════
+// atld.hse_contract_workers là trục nối NLĐ ↔ hợp đồng: engine xét điều kiện lấy
+// risk_level qua đây, đình chỉ chặn theo đây, và đối chiếu khóa học JSA cũng lấy
+// danh sách NLĐ từ đây. Trước đây bảng chỉ được đọc, không có đường ghi nào.
+async function contractInScope(id: number, user: AuthUser) {
+  if (!Number.isInteger(id) || id <= 0) return null
+  const { all, siteId } = siteScope(user)
+  const r = await query<{ id: number; risk_level: string; contractor_id: number }>(
+    `SELECT c.id, c.risk_level, c.contractor_id FROM atld.hse_contracts c
+     WHERE c.id = $1 AND ($2::boolean OR c.site_id = $3)`, [id, all, siteId])
+  return r.rows[0] ?? null
+}
+
+hseRouter.get('/contracts/:id/workers', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!(await contractInScope(id, req.user!))) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+  const r = await query(
+    `SELECT w.id, w.full_name, w.id_number, w.job_title, w.access_status,
+            w.contractor_id, ct.name AS contractor_name, cw.assigned_at
+     FROM atld.hse_contract_workers cw
+     JOIN atld.hse_workers w ON w.id = cw.worker_id
+     JOIN atld.hse_contractors ct ON ct.id = w.contractor_id
+     WHERE cw.contract_id = $1 ORDER BY w.full_name, w.id`, [id])
+  res.json({ workers: r.rows })
+})
+
+// Danh sách NLĐ chọn được cho hợp đồng này (đã loại người đã gán).
+// Cho phép gán chéo nhà thầu: nhà thầu chính thường điều động NLĐ của nhà thầu phụ.
+hseRouter.get('/contracts/:id/available-workers', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!(await contractInScope(id, req.user!))) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+  const q = String(req.query.q ?? '').trim()
+  const r = await query(
+    `SELECT w.id, w.full_name, w.id_number, w.job_title,
+            w.contractor_id, ct.name AS contractor_name
+     FROM atld.hse_workers w
+     JOIN atld.hse_contractors ct ON ct.id = w.contractor_id
+     WHERE NOT EXISTS (SELECT 1 FROM atld.hse_contract_workers cw
+                       WHERE cw.contract_id = $1 AND cw.worker_id = w.id)
+       AND ($2 = '' OR w.full_name ILIKE $3 OR w.id_number ILIKE $3)
+     ORDER BY ct.name, w.full_name LIMIT 200`,
+    [id, q, `%${q}%`])
+  res.json({ workers: r.rows })
+})
+
+hseRouter.post('/contracts/:id/workers', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  const contract = await contractInScope(id, req.user!)
+  if (!contract) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+  const ids: unknown[] = Array.isArray(req.body?.worker_ids) ? req.body.worker_ids : []
+  const workerIds: number[] = [...new Set(ids.map((v) => Number(v)))]
+    .filter((n) => Number.isInteger(n) && n > 0)
+  if (!workerIds.length) return res.status(400).json({ error: 'Chưa chọn người lao động.' })
+  const exists = await query<{ id: number }>(
+    `SELECT id FROM atld.hse_workers WHERE id = ANY($1::int[])`, [workerIds])
+  if (exists.rows.length !== workerIds.length)
+    return res.status(400).json({ error: 'Có người lao động không tồn tại.' })
+  await query(
+    `INSERT INTO atld.hse_contract_workers (contract_id, worker_id)
+     SELECT $1, u FROM unnest($2::int[]) AS u
+     ON CONFLICT (contract_id, worker_id) DO NOTHING`, [id, workerIds])
+  // Gán vào hợp đồng có thể đổi mức rủi ro cao nhất của NLĐ → xét lại quyền ra/vào.
+  for (const workerId of workerIds) await syncWorkerAccess(workerId)
+  await audit(req.user!, 'CONTRACT_WORKER_ASSIGN', 'contract', id, null,
+    { worker_ids: workerIds }, clientIp(req))
+  res.status(201).json({ ok: true, assigned: workerIds.length })
+})
+
+hseRouter.delete('/contracts/:id/workers/:workerId', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  const workerId = Number(req.params.workerId)
+  if (!(await contractInScope(id, req.user!))) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+  const r = await query(
+    `DELETE FROM atld.hse_contract_workers WHERE contract_id = $1 AND worker_id = $2`, [id, workerId])
+  if (!r.rowCount) return res.status(404).json({ error: 'Người lao động không thuộc hợp đồng này.' })
+  await syncWorkerAccess(workerId)
+  await audit(req.user!, 'CONTRACT_WORKER_REMOVE', 'contract', id, { worker_id: workerId }, null, clientIp(req))
+  res.json({ ok: true })
 })
 
 // ═══════════════ XUẤT BÁO CÁO HỒ SƠ KIỂM SOÁT AN TOÀN (theo hợp đồng) ═══════════════
