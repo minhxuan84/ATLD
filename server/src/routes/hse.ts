@@ -1,7 +1,6 @@
 // Quản lý ATVSLĐ / PCCN / BVMT cho nhà thầu, NCC, khách (QT111-07)
 // Tất cả bảng dùng schema atld, prefix hse_. Migration additive-only.
 import { Router } from 'express'
-import multer from 'multer'
 import path from 'node:path'
 import fs from 'node:fs'
 import crypto from 'node:crypto'
@@ -9,45 +8,27 @@ import { fileURLToPath } from 'node:url'
 import ExcelJS from 'exceljs'
 import { query } from '../db.js'
 import { requireAuth, requireSection, requireHse, siteScope } from '../auth.js'
-import type { AuthUser } from '../auth.js'
 import { buildCommitmentPdf, hashPdf } from '../lib/pdf.js'
 import { initiateSign, getSignStatus, verifyWebhookSignature, isSmartCaConfigured } from '../lib/smartca.js'
-import { escapeText, sanitizeFileName, ALLOWED_EXT, MAX_FILE_MB } from '../util.js'
+import { escapeText, sanitizeFileName } from '../util.js'
+import { checkContractTraining } from '../lib/hse-training.js'
+import {
+  upload,
+  UPLOAD_DIR,
+  audit,
+  clientIp,
+  RISK_RANK,
+  titleMatches,
+  riskApplies,
+  evalWorkerEligibility,
+  evalEquipmentEligibility,
+  syncWorkerAccess,
+  syncEquipmentAccess,
+} from '../lib/hse-core.js'
 
 export const hseRouter = Router()
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const UPLOAD_DIR = path.join(__dirname, '..', '..', 'uploads', 'hse')
-fs.mkdirSync(UPLOAD_DIR, { recursive: true })
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase().replace('.', '')
-    cb(null, `${crypto.randomUUID()}.${ext}`)
-  },
-})
-const upload = multer({
-  storage,
-  limits: { fileSize: MAX_FILE_MB * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase().replace('.', '')
-    cb(null, ALLOWED_EXT.includes(ext))
-  },
-})
-
-// ── Ghi audit log bất biến (không bao giờ update/delete) ─────────
-async function audit(
-  actor: AuthUser, action: string, entity: string, entityId: number,
-  oldVal: unknown, newVal: unknown, ip?: string,
-) {
-  await query(
-    `INSERT INTO atld.hse_audit_logs (actor_id, action, entity_type, entity_id, old_value, new_value, ip_address)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [actor.id, action, entity, entityId, oldVal ? JSON.stringify(oldVal) : null,
-     newVal ? JSON.stringify(newVal) : null, ip ?? null],
-  )
-}
 
 // ── MIGRATION khi module load (additive-only, schema atld) ──────
 ;(async () => {
@@ -413,6 +394,272 @@ async function audit(
         ('EQP_INSURANCE','Bảo hiểm thiết bị',                    'equipment',  false,30, 20)
       ) AS v(code,name,scope,is_mandatory,warn_days_before,sort_order)
       WHERE NOT EXISTS (SELECT 1 FROM atld.hse_doc_types LIMIT 1)`)
+
+    // ── Pha 0: Nối danh tính NLĐ qua CCCD (users ↔ hse_workers) ──────
+    await query(`ALTER TABLE atld.users ADD COLUMN IF NOT EXISTS id_number VARCHAR(30)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_users_id_number ON atld.users(id_number) WHERE id_number IS NOT NULL`)
+
+    // ── Pha 1: Danh mục công việc JSA (Job Safety Analysis) ──────
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_work_types (
+      id SERIAL PRIMARY KEY,
+      code VARCHAR(50) UNIQUE NOT NULL,
+      name VARCHAR(200) NOT NULL,
+      description TEXT,
+      risk_level VARCHAR(20) NOT NULL DEFAULT 'medium',
+      requires_permit BOOLEAN NOT NULL DEFAULT true,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_jsa_work_types_active ON atld.jsa_work_types(is_active, sort_order)`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_ppe_items (
+      id SERIAL PRIMARY KEY,
+      code VARCHAR(50) UNIQUE NOT NULL,
+      name VARCHAR(200) NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_work_type_ppe (
+      work_type_id INTEGER NOT NULL REFERENCES atld.jsa_work_types(id) ON DELETE CASCADE,
+      ppe_item_id INTEGER NOT NULL REFERENCES atld.jsa_ppe_items(id) ON DELETE CASCADE,
+      PRIMARY KEY (work_type_id, ppe_item_id)
+    )`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_work_type_docs (
+      work_type_id INTEGER NOT NULL REFERENCES atld.jsa_work_types(id) ON DELETE CASCADE,
+      doc_type_id INTEGER NOT NULL REFERENCES atld.hse_doc_types(id) ON DELETE CASCADE,
+      PRIMARY KEY (work_type_id, doc_type_id)
+    )`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_work_type_courses (
+      work_type_id INTEGER NOT NULL REFERENCES atld.jsa_work_types(id) ON DELETE CASCADE,
+      course_id VARCHAR(60) NOT NULL,
+      PRIMARY KEY (work_type_id, course_id)
+    )`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_checklist_items (
+      id SERIAL PRIMARY KEY,
+      work_type_id INTEGER NOT NULL REFERENCES atld.jsa_work_types(id) ON DELETE CASCADE,
+      item_code VARCHAR(50),
+      category VARCHAR(120),
+      item_name TEXT NOT NULL,
+      requires_photo BOOLEAN NOT NULL DEFAULT false,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_jsa_checklist_work_type ON atld.jsa_checklist_items(work_type_id, sort_order)`)
+
+    // Seed loại công việc nguy hiểm từ QT111-07
+    await query(`
+      INSERT INTO atld.jsa_work_types (code, name, description, risk_level, sort_order)
+      VALUES
+        ('CONFINED_SPACE', 'Không gian hạn chế', 'Làm việc trong bể chứa, hầm, hố sâu, đường ống kín', 'high', 10),
+        ('HOT_WORK', 'Làm việc có nhiệt', 'Hàn, cắt, mài, các công việc sinh tia lửa/nhiệt', 'high', 20),
+        ('ELECTRICAL', 'Công tác điện', 'Lắp đặt, sửa chữa, bảo trì hệ thống điện', 'high', 30),
+        ('WORK_AT_HEIGHT', 'Làm việc trên cao', 'Làm việc từ 2m trở lên so với mặt đất', 'medium', 40),
+        ('SCAFFOLDING', 'Lắp dựng giàn giáo', 'Thi công, tháo dỡ giàn giáo, sàn thao tác', 'medium', 50),
+        ('LIFTING', 'Sử dụng thiết bị nâng/cẩu', 'Cần cẩu, pa-lăng, xe nâng hàng', 'medium', 60),
+        ('CHEMICAL', 'Sử dụng hóa chất nguy hiểm', 'Xử lý, vận chuyển, lưu trữ hóa chất độc hại/ăn mòn/dễ cháy', 'high', 70),
+        ('EXCAVATION', 'Đào đất, đào hố móng', 'Đào sâu từ 1.2m trở lên, nguy cơ sập lở', 'medium', 80)
+      ON CONFLICT (code) DO NOTHING`)
+
+    // Seed PPE cơ bản
+    await query(`
+      INSERT INTO atld.jsa_ppe_items (code, name, sort_order)
+      VALUES
+        ('HELMET', 'Mũ bảo hộ lao động', 10),
+        ('SAFETY_SHOES', 'Giày bảo hộ', 20),
+        ('GLOVES', 'Găng tay bảo hộ', 30),
+        ('GOGGLES', 'Kính bảo hộ', 40),
+        ('MASK', 'Khẩu trang/mặt nạ phòng độc', 50),
+        ('HARNESS', 'Dây đai an toàn', 60),
+        ('EAR_PROTECTION', 'Bịt tai chống ồn', 70),
+        ('WELDING_SHIELD', 'Mặt nạ hàn', 80),
+        ('INSULATED_GLOVES', 'Găng tay cách điện', 90),
+        ('REFLECTIVE_VEST', 'Áo phản quang', 100)
+      ON CONFLICT (code) DO NOTHING`)
+
+    // Seed checklist mặc định — tạo 2 work type DAILY/FULL, migrate hardcode từ InspectionsPage.tsx
+    // giữ đúng item_code/category cũ để dữ liệu hse_inspection_items tương thích.
+    await query(`
+      INSERT INTO atld.jsa_work_types (code, name, description, risk_level, requires_permit, sort_order)
+      VALUES
+        ('DEFAULT_DAILY', 'Kiểm tra hàng ngày (BM-04)', 'Checklist kiểm tra nhanh hàng ngày theo 3 nhóm A/B/C', 'low', false, 1),
+        ('DEFAULT_FULL', 'Kiểm tra ban đầu/tuần/tháng (BM-03)', 'Checklist toàn diện theo 3 nhóm A/B/C', 'medium', false, 2)
+      ON CONFLICT (code) DO NOTHING`)
+
+    // Dọn trùng do bản seed cũ sinh ra: 'ON CONFLICT DO NOTHING' ở phần chèn checklist
+    // không có ràng buộc unique nào để đối chiếu nên chưa từng chặn gì — mỗi lần khởi
+    // động server lại chèn thêm một bộ, checklist phình theo số lần restart.
+    // Chỉ dọn 2 work type do hệ thống seed, giữ dòng id nhỏ nhất của mỗi
+    // (item_code, category, item_name) — không đụng checklist do người dùng tự nhập.
+    // An toàn vì hse_inspection_items *chép giá trị* sang chứ không FK tới id ở đây.
+    await query(`
+      DELETE FROM atld.jsa_checklist_items c
+      USING atld.jsa_work_types wt
+      WHERE wt.id = c.work_type_id
+        AND wt.code IN ('DEFAULT_DAILY', 'DEFAULT_FULL')
+        AND EXISTS (
+          SELECT 1 FROM atld.jsa_checklist_items k
+          WHERE k.work_type_id = c.work_type_id
+            AND k.item_code IS NOT DISTINCT FROM c.item_code
+            AND k.category  IS NOT DISTINCT FROM c.category
+            AND k.item_name = c.item_name
+            AND k.id < c.id
+        )`)
+
+    // Chỉ seed khi work type chưa có mục nào: người dùng sửa/bớt checklist qua trang
+    // Danh mục công việc thì lần khởi động sau không được chèn lại đè lên ý họ.
+    const seedChecklist = async (code: string, items: Array<[string, string, string]>) => {
+      const wt = await query<{ id: number }>(
+        `SELECT id FROM atld.jsa_work_types WHERE code = $1`, [code])
+      const id = wt.rows[0]?.id
+      if (!id) return
+      const have = await query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM atld.jsa_checklist_items WHERE work_type_id = $1`, [id])
+      if (Number(have.rows[0]?.n ?? '0') > 0) return
+      for (let i = 0; i < items.length; i++) {
+        const [itemCode, category, name] = items[i]!
+        await query(
+          `INSERT INTO atld.jsa_checklist_items
+             (work_type_id, item_code, category, item_name, requires_photo, sort_order)
+           VALUES ($1,$2,$3,$4,false,$5)`,
+          [id, itemCode, category, name, i + 1])
+      }
+    }
+
+    await seedChecklist('DEFAULT_DAILY', [
+      ['A01', 'A', 'Trang bị & sử dụng đúng BHLĐ cá nhân'],
+      ['A02', 'A', 'NLĐ có thẻ ra/vào, đủ điều kiện làm việc'],
+      ['B01', 'B', 'Rào chắn, biển báo, cảnh báo khu vực thi công'],
+      ['B02', 'B', 'Vệ sinh môi trường, thu gom chất thải'],
+      ['B03', 'B', 'An toàn điện thi công, PCCC & thoát hiểm'],
+      ['C01', 'C', 'Thiết bị, dụng cụ trong tình trạng an toàn'],
+    ])
+
+    await seedChecklist('DEFAULT_FULL', [
+      ['A01', 'A', 'Trang bị & sử dụng đúng BHLĐ cá nhân'],
+      ['A02', 'A', 'NLĐ có thẻ ra/vào, đủ điều kiện làm việc'],
+      ['A03', 'A', 'Hồ sơ huấn luyện ATVSLĐ, khám sức khỏe còn hiệu lực'],
+      ['B01', 'B', 'Rào chắn, biển báo, cảnh báo khu vực thi công'],
+      ['B02', 'B', 'Vệ sinh môi trường, thu gom chất thải'],
+      ['B03', 'B', 'An toàn điện thi công, PCCC & thoát hiểm'],
+      ['B04', 'B', 'Giàn giáo / thang / sàn công tác đạt yêu cầu'],
+      ['B05', 'B', 'Quản lý hóa chất / vật liệu nguy hiểm'],
+      ['C01', 'C', 'Thiết bị, dụng cụ trong tình trạng an toàn'],
+      ['C02', 'C', 'Thiết bị nâng / cẩu có kiểm định còn hiệu lực'],
+    ])
+
+    // ── Pha 2: Ngẫu nhiên hóa đề thi & hạn chứng chỉ ──────
+    await query(`ALTER TABLE atld.courses ADD COLUMN IF NOT EXISTS questions_per_attempt INTEGER NOT NULL DEFAULT 0`)
+    await query(`ALTER TABLE atld.courses ADD COLUMN IF NOT EXISTS validity_months INTEGER`)
+    await query(`ALTER TABLE atld.courses ADD COLUMN IF NOT EXISTS randomize_options BOOLEAN NOT NULL DEFAULT false`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.quiz_attempts (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES atld.users(id) ON DELETE CASCADE,
+      course_id VARCHAR(60) NOT NULL,
+      question_ids JSONB NOT NULL,
+      answers JSONB NOT NULL,
+      score INTEGER NOT NULL,
+      passed BOOLEAN NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      submitted_at TIMESTAMPTZ
+    )`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user_course ON atld.quiz_attempts(user_id, course_id, submitted_at DESC)`)
+
+    await query(`ALTER TABLE atld.progress ADD COLUMN IF NOT EXISTS expires_at DATE`)
+
+    // ── Pha 3: e-Permit workflow ──────────────────────────
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_permits (
+      id SERIAL PRIMARY KEY,
+      permit_number VARCHAR(50) UNIQUE NOT NULL,
+      site_id INTEGER NOT NULL REFERENCES atld.branches(id),
+      work_type_id INTEGER REFERENCES atld.jsa_work_types(id) ON DELETE SET NULL,
+      location VARCHAR(200) NOT NULL,
+      work_description TEXT NOT NULL,
+      start_time TIMESTAMPTZ NOT NULL,
+      end_time TIMESTAMPTZ NOT NULL,
+      requester_id INTEGER NOT NULL REFERENCES atld.users(id),
+      status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'submitted', 'approved', 'active', 'closed', 'cancelled')),
+      submitted_at TIMESTAMPTZ,
+      approved_by INTEGER REFERENCES atld.users(id),
+      approved_at TIMESTAMPTZ,
+      activated_at TIMESTAMPTZ,
+      closed_at TIMESTAMPTZ,
+      closure_notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_jsa_permits_site ON atld.jsa_permits(site_id, status, start_time DESC)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_jsa_permits_number ON atld.jsa_permits(permit_number)`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_permit_workers (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER NOT NULL REFERENCES atld.jsa_permits(id) ON DELETE CASCADE,
+      worker_id INTEGER NOT NULL REFERENCES atld.hse_workers(id) ON DELETE CASCADE,
+      role VARCHAR(100),
+      UNIQUE(permit_id, worker_id)
+    )`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_permit_hazards (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER NOT NULL REFERENCES atld.jsa_permits(id) ON DELETE CASCADE,
+      hazard_description TEXT NOT NULL,
+      risk_level VARCHAR(20) CHECK (risk_level IN ('low', 'medium', 'high')),
+      sequence INTEGER NOT NULL DEFAULT 0
+    )`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_permit_controls (
+      id SERIAL PRIMARY KEY,
+      hazard_id INTEGER NOT NULL REFERENCES atld.jsa_permit_hazards(id) ON DELETE CASCADE,
+      control_measure TEXT NOT NULL,
+      sequence INTEGER NOT NULL DEFAULT 0
+    )`)
+
+    await query(`CREATE TABLE IF NOT EXISTS atld.jsa_permit_approvals (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER NOT NULL REFERENCES atld.jsa_permits(id) ON DELETE CASCADE,
+      approver_id INTEGER NOT NULL REFERENCES atld.users(id),
+      role VARCHAR(50) NOT NULL,
+      decision VARCHAR(20) NOT NULL CHECK (decision IN ('approved', 'rejected')),
+      comments TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_jsa_permit_approvals_permit ON atld.jsa_permit_approvals(permit_id, created_at DESC)`)
+
+    // ── Pha 4: Kiểm tra hiện trường + ảnh minh chứng ──────
+    // Kiểm tra theo giấy phép / loại công việc, không chỉ theo hợp đồng.
+    await query(`ALTER TABLE atld.hse_inspections ADD COLUMN IF NOT EXISTS permit_id INTEGER REFERENCES atld.jsa_permits(id) ON DELETE SET NULL`)
+    await query(`ALTER TABLE atld.hse_inspections ADD COLUMN IF NOT EXISTS work_type_id INTEGER REFERENCES atld.jsa_work_types(id) ON DELETE SET NULL`)
+    await query(`ALTER TABLE atld.hse_inspections ADD COLUMN IF NOT EXISTS training_snapshot JSONB`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_inspections_permit ON atld.hse_inspections(permit_id) WHERE permit_id IS NOT NULL`)
+
+    // Nhiều ảnh cho mỗi hạng mục checklist (evidence_file cũ chỉ giữ 1 ảnh, để tương thích).
+    await query(`CREATE TABLE IF NOT EXISTS atld.hse_inspection_photos (
+      id SERIAL PRIMARY KEY,
+      item_id INTEGER NOT NULL REFERENCES atld.hse_inspection_items(id) ON DELETE CASCADE,
+      file_name VARCHAR(255) NOT NULL,
+      stored_name VARCHAR(255) NOT NULL,
+      caption TEXT,
+      uploaded_by INTEGER,
+      taken_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_inspection_photos_item ON atld.hse_inspection_photos(item_id, taken_at)`)
+
+    // Hạng mục nào bắt buộc có ảnh — chép từ jsa_checklist_items lúc lập biên bản.
+    await query(`ALTER TABLE atld.hse_inspection_items ADD COLUMN IF NOT EXISTS requires_photo BOOLEAN NOT NULL DEFAULT false`)
+
+    // ── Pha 5: Nghiệm thu & tra cứu ───────────────────────
+    // closed_at/closure_notes đã có từ Pha 3; thiếu người nghiệm thu nên bổ sung.
+    await query(`ALTER TABLE atld.jsa_permits ADD COLUMN IF NOT EXISTS closed_by INTEGER REFERENCES atld.users(id)`)
+    // Trang nhật ký audit lọc theo actor và khoảng ngày → index cho hai trục đó.
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_audit_created ON atld.hse_audit_logs(created_at DESC)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_audit_actor ON atld.hse_audit_logs(actor_id, created_at DESC)`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }
@@ -423,9 +670,6 @@ const canWrite = [requireAuth, requireSection('an-toan')]
 const canGate = [requireAuth, requireHse('gate', 'inspect', 'approve')]
 const canInspect = [requireAuth, requireHse('inspect', 'approve')]
 const canApprove = [requireAuth, requireHse('approve')]
-
-const clientIp = (req: { ip?: string; headers: Record<string, unknown> }) =>
-  (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || ''
 
 // ═══════════════ LOẠI HỒ SƠ ═══════════════
 hseRouter.get('/doc-types', requireAuth, async (req, res) => {
@@ -791,6 +1035,57 @@ hseRouter.get('/contracts/:id/report', requireAuth, requireSection('an-toan'), a
      WHERE l.contract_id = $1 OR l.worker_id = ANY($2::int[])
      ORDER BY l.logged_at DESC LIMIT 2000`, [id, workerIds])
 
+  // ── Pha 5: giấy phép, phê duyệt, ảnh minh chứng ─────────────────
+  // Giấy phép của hợp đồng: jsa_permits không nối trực tiếp contract_id, nên
+  // lấy qua các biên bản kiểm tra đã gắn permit_id (Pha 4).
+  const permits = await query<{
+    id: number; permit_number: string; work_type_name: string | null; location: string
+    work_description: string; start_time: string; end_time: string; status: string
+    requester_name: string | null; approver_name: string | null
+    closed_by_name: string | null; closed_at: string | null; closure_notes: string | null
+  }>(
+    `SELECT DISTINCT p.id, p.permit_number, wt.name AS work_type_name, p.location,
+            p.work_description, p.start_time, p.end_time, p.status,
+            u.full_name AS requester_name, ap.full_name AS approver_name,
+            cl.full_name AS closed_by_name, p.closed_at, p.closure_notes
+     FROM atld.jsa_permits p
+     LEFT JOIN atld.jsa_work_types wt ON wt.id = p.work_type_id
+     LEFT JOIN atld.users u ON u.id = p.requester_id
+     LEFT JOIN atld.users ap ON ap.id = p.approved_by
+     LEFT JOIN atld.users cl ON cl.id = p.closed_by
+     WHERE p.id IN (SELECT permit_id FROM atld.hse_inspections
+                    WHERE contract_id = $1 AND permit_id IS NOT NULL)
+     ORDER BY p.start_time DESC`, [id])
+
+  const permitIds = permits.rows.map((p) => p.id)
+  const approvals = permitIds.length
+    ? (await query<{
+        permit_number: string; approver_name: string; role: string | null
+        decision: string | null; comments: string | null; created_at: string
+      }>(
+        `SELECT p.permit_number, u.full_name AS approver_name, a.role, a.decision,
+                a.comments, a.created_at
+         FROM atld.jsa_permit_approvals a
+         JOIN atld.jsa_permits p ON p.id = a.permit_id
+         JOIN atld.users u ON u.id = a.approver_id
+         WHERE a.permit_id = ANY($1) ORDER BY p.permit_number, a.created_at`, [permitIds])).rows
+    : []
+
+  // Ảnh minh chứng của các biên bản thuộc hợp đồng này (Pha 4).
+  const photos = await query<{
+    inspection_date: string | null; form_type: string; item_code: string | null
+    item_name: string | null; result: string | null; file_name: string
+    caption: string | null; taken_at: string
+  }>(
+    `SELECT COALESCE(i.inspection_date, i.scheduled_date, i.conducted_at::date) AS inspection_date,
+            i.form_type, it.item_code, it.item_name, it.result,
+            ph.file_name, ph.caption, ph.taken_at
+     FROM atld.hse_inspection_photos ph
+     JOIN atld.hse_inspection_items it ON it.id = ph.item_id
+     JOIN atld.hse_inspections i ON i.id = it.inspection_id
+     WHERE i.contract_id = $1
+     ORDER BY ph.taken_at DESC LIMIT 2000`, [id])
+
   // ── Dựng workbook ──────────────────────────────────────────────
   const wb = new ExcelJS.Workbook()
   wb.creator = 'ATLĐ - QT111-07'
@@ -906,8 +1201,43 @@ hseRouter.get('/contracts/:id/report', requireAuth, requireSection('an-toan'), a
       l.result === 'allowed' ? 'Cho vào' : 'Chặn', l.block_reason ?? '', l.guard_name ?? '',
     ]), [20, 22, 16, 10, 12, 40, 20])
 
+  // Sheet 7: Giấy phép làm việc (Pha 5)
+  const PERMIT_STATUS_VI: Record<string, string> = {
+    draft: 'Nháp', submitted: 'Chờ duyệt', approved: 'Đã duyệt',
+    active: 'Đang thi công', closed: 'Đã nghiệm thu', cancelled: 'Đã hủy',
+  }
+  const s7 = wb.addWorksheet('Giấy phép làm việc')
+  addTable(s7, ['Số giấy phép', 'Loại công việc', 'Vị trí', 'Nội dung', 'Bắt đầu', 'Kết thúc',
+    'Trạng thái', 'Người đề nghị', 'Người phê duyệt', 'Người nghiệm thu', 'Thời điểm đóng', 'Ý kiến nghiệm thu'],
+    permits.rows.map((p) => [
+      p.permit_number, p.work_type_name ?? '', p.location, p.work_description,
+      VI_DATETIME(p.start_time), VI_DATETIME(p.end_time),
+      PERMIT_STATUS_VI[p.status] ?? p.status,
+      p.requester_name ?? '', p.approver_name ?? '', p.closed_by_name ?? '',
+      VI_DATETIME(p.closed_at), p.closure_notes ?? '',
+    ]), [18, 22, 22, 34, 20, 20, 16, 22, 22, 22, 20, 30])
+
+  // Sheet 8: Lịch sử phê duyệt giấy phép
+  const s8 = wb.addWorksheet('Phê duyệt giấy phép')
+  addTable(s8, ['Số giấy phép', 'Thời điểm', 'Người duyệt', 'Vai trò', 'Quyết định', 'Ý kiến'],
+    approvals.map((a) => [
+      a.permit_number, VI_DATETIME(a.created_at), a.approver_name, a.role ?? '',
+      a.decision === 'approved' ? 'Đồng ý' : a.decision === 'rejected' ? 'Từ chối' : a.decision ?? '',
+      a.comments ?? '',
+    ]), [18, 20, 22, 18, 14, 40])
+
+  // Sheet 9: Ảnh minh chứng kiểm tra
+  const s9 = wb.addWorksheet('Ảnh minh chứng')
+  addTable(s9, ['Ngày kiểm tra', 'Loại phiếu', 'Mã hạng mục', 'Hạng mục', 'Kết quả', 'Tên ảnh', 'Chú thích', 'Thời điểm chụp'],
+    photos.rows.map((p) => [
+      VI_DATE(p.inspection_date), p.form_type, p.item_code ?? '', p.item_name ?? '',
+      RESULT_VI[p.result ?? ''] ?? p.result ?? '',
+      p.file_name, p.caption ?? '', VI_DATETIME(p.taken_at),
+    ]), [16, 16, 14, 34, 14, 30, 26, 20])
+
   await audit(req.user!, 'CONTRACT_REPORT_EXPORT', 'contract', id, null,
-    { contract_no: ct.contract_no, workers: workers.length }, clientIp(req))
+    { contract_no: ct.contract_no, workers: workers.length,
+      permits: permits.rows.length, photos: photos.rows.length }, clientIp(req))
 
   const buf = await wb.xlsx.writeBuffer()
   const fname = sanitizeFileName(`HoSoATLD_${ct.contract_no}_${new Date().toISOString().slice(0, 10)}.xlsx`)
@@ -920,105 +1250,11 @@ hseRouter.get('/contracts/:id/report', requireAuth, requireSection('an-toan'), a
 // Ma trận điều kiện (Phase D):
 //  - applies_to: danh sách từ khóa chức danh (phân tách bằng dấu phẩy). Rỗng = áp dụng mọi chức danh.
 //  - risk_level: hồ sơ chỉ bắt buộc khi rủi ro hợp đồng ≥ mức này. Rỗng = luôn bắt buộc.
-const RISK_RANK: Record<string, number> = { low: 1, medium: 2, high: 3 }
-function titleMatches(appliesTo: string | null, jobTitle: string | null): boolean {
-  const rule = String(appliesTo ?? '').trim()
-  if (!rule) return true
-  const jt = String(jobTitle ?? '').toLowerCase()
-  return rule.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean).some((kw) => jt.includes(kw))
-}
-function riskApplies(docRisk: string | null, contractRisk: string): boolean {
-  const need = RISK_RANK[String(docRisk ?? '').trim()] ?? 0
-  return need === 0 || (RISK_RANK[contractRisk] ?? 2) >= need
-}
 
-// Engine R1: NLĐ đủ điều kiện vào cổng khi mọi hồ sơ BẮT BUỘC ÁP DỤNG (theo ma trận)
-// đều APPROVED và chưa hết hạn. Trả về { ok, missing[] }.
-async function evalWorkerEligibility(workerId: number): Promise<{ ok: boolean; missing: string[] }> {
-  const w = await query<{ job_title: string | null }>(
-    `SELECT job_title FROM atld.hse_workers WHERE id = $1`, [workerId])
-  const jobTitle = w.rows[0]?.job_title ?? null
-  // Mức rủi ro cao nhất trong các hợp đồng NLĐ tham gia (mặc định 'medium' nếu chưa gán).
-  const cr = await query<{ risk_level: string }>(
-    `SELECT c.risk_level FROM atld.hse_contract_workers cw
-     JOIN atld.hse_contracts c ON c.id = cw.contract_id WHERE cw.worker_id = $1`, [workerId])
-  const contractRisk = cr.rows.reduce((m, r) => (RISK_RANK[r.risk_level] ?? 2) > (RISK_RANK[m] ?? 2) ? r.risk_level : m, 'low')
-  const all = await query<{ id: number; name: string; applies_to: string | null; risk_level: string | null }>(
-    `SELECT id, name, applies_to, risk_level FROM atld.hse_doc_types
-     WHERE scope = 'worker' AND is_mandatory = true AND is_active = true`)
-  // Chỉ giữ hồ sơ áp dụng cho chức danh & mức rủi ro này.
-  const mandatory = { rows: all.rows.filter((dt) => titleMatches(dt.applies_to, jobTitle) && riskApplies(dt.risk_level, contractRisk)) }
-  const docs = await query<{ doc_type_id: number; status: string; expiry_date: string | null }>(
-    `SELECT doc_type_id, status, expiry_date FROM atld.hse_worker_docs WHERE worker_id = $1`, [workerId])
-  const missing: string[] = []
-  // So sánh phần ngày (slice) để tránh lệch do pg trả date kèm timestamp/timezone.
-  const today = new Date().toISOString().slice(0, 10)
-  const dateOf = (d: string | null) => (d ? String(d).slice(0, 10) : null)
-  for (const dt of mandatory.rows) {
-    const match = docs.rows.filter((d) => d.doc_type_id === dt.id)
-    const valid = match.find((d) => d.status === 'approved' && (!dateOf(d.expiry_date) || dateOf(d.expiry_date)! >= today))
-    if (!valid) {
-      const expired = match.find((d) => d.status === 'approved' && dateOf(d.expiry_date) && dateOf(d.expiry_date)! < today)
-      const pending = match.find((d) => d.status === 'pending')
-      const rejected = match.find((d) => d.status === 'rejected')
-      missing.push(
-        expired ? `${dt.name} (hết hạn ${dateOf(expired.expiry_date)})`
-        : pending ? `${dt.name} (đã nộp, chờ duyệt)`
-        : rejected ? `${dt.name} (bị từ chối, cần nộp lại)`
-        : `${dt.name} (chưa nộp)`,
-      )
-    }
-  }
-  return { ok: missing.length === 0, missing }
-}
+// ══════════════════════════════════════════════════════════════════
+// ROUTES
+// ══════════════════════════════════════════════════════════════════
 
-// Engine tương tự cho THIẾT BỊ: đủ điều kiện khi mọi hồ sơ bắt buộc (scope=equipment)
-// đều approved và chưa hết hạn.
-async function evalEquipmentEligibility(equipmentId: number): Promise<{ ok: boolean; missing: string[] }> {
-  const mandatory = await query<{ id: number; name: string }>(
-    `SELECT id, name FROM atld.hse_doc_types WHERE scope = 'equipment' AND is_mandatory = true AND is_active = true`)
-  const docs = await query<{ doc_type_id: number; status: string; expiry_date: string | null }>(
-    `SELECT doc_type_id, status, expiry_date FROM atld.hse_equipment_docs WHERE equipment_id = $1`, [equipmentId])
-  const missing: string[] = []
-  const today = new Date().toISOString().slice(0, 10)
-  const dateOf = (d: string | null) => (d ? String(d).slice(0, 10) : null)
-  for (const dt of mandatory.rows) {
-    const match = docs.rows.filter((d) => d.doc_type_id === dt.id)
-    const valid = match.find((d) => d.status === 'approved' && (!dateOf(d.expiry_date) || dateOf(d.expiry_date)! >= today))
-    if (!valid) {
-      const expired = match.find((d) => d.status === 'approved' && dateOf(d.expiry_date) && dateOf(d.expiry_date)! < today)
-      const pending = match.find((d) => d.status === 'pending')
-      const rejected = match.find((d) => d.status === 'rejected')
-      missing.push(
-        expired ? `${dt.name} (hết hạn ${dateOf(expired.expiry_date)})`
-        : pending ? `${dt.name} (đã nộp, chờ duyệt)`
-        : rejected ? `${dt.name} (bị từ chối, cần nộp lại)`
-        : `${dt.name} (chưa nộp)`)
-    }
-  }
-  return { ok: missing.length === 0, missing }
-}
-
-async function syncEquipmentAccess(equipmentId: number): Promise<string> {
-  const cur = await query<{ access_status: string }>(
-    `SELECT access_status FROM atld.hse_equipments WHERE id = $1`, [equipmentId])
-  if (cur.rows[0]?.access_status === 'suspended') return 'suspended'
-  const { ok } = await evalEquipmentEligibility(equipmentId)
-  const next = ok ? 'allowed' : 'blocked'
-  await query(`UPDATE atld.hse_equipments SET access_status = $1, updated_at = now() WHERE id = $2`, [next, equipmentId])
-  return next
-}
-
-// Đồng bộ access_status theo hồ sơ (không hạ cấp khi đang bị đình chỉ).
-async function syncWorkerAccess(workerId: number): Promise<string> {
-  const cur = await query<{ access_status: string }>(
-    `SELECT access_status FROM atld.hse_workers WHERE id = $1`, [workerId])
-  if (cur.rows[0]?.access_status === 'suspended') return 'suspended'
-  const { ok } = await evalWorkerEligibility(workerId)
-  const next = ok ? 'allowed' : 'blocked'
-  await query(`UPDATE atld.hse_workers SET access_status = $1, updated_at = now() WHERE id = $2`, [next, workerId])
-  return next
-}
 
 hseRouter.get('/workers', requireAuth, async (req, res) => {
   const contractorId = req.query.contractorId ? Number(req.query.contractorId) : null
@@ -1117,7 +1353,7 @@ hseRouter.patch('/worker-docs/:id', ...canInspect, async (req, res) => {
 
 // ═══════════════ CỔNG KIỂM SOÁT (R1) ═══════════════
 // Tra cứu nhanh: bảo vệ nhập tên/CCCD → biết cho vào hay chặn.
-hseRouter.get('/gate/lookup', requireAuth, async (req, res) => {
+hseRouter.get('/gate/lookup', requireAuth, requireHse('gate', 'inspect', 'approve'), async (req, res) => {
   const q = String(req.query.q ?? '').trim()
   if (!q) return res.json({ results: [] })
   const workers = await query<{ id: number; full_name: string; id_number: string | null; access_status: string; contractor_name: string; presence: string; last_in_at: string | null; last_out_at: string | null }>(
@@ -1167,11 +1403,14 @@ hseRouter.post('/gate/log', ...canGate, async (req, res) => {
       `UPDATE atld.hse_workers SET presence = $1, ${col} = now(), updated_at = now() WHERE id = $2`,
       [presence, workerId])
   }
+  // Ghi audit cả lượt cho qua và lượt bị chặn — đây là hành vi an ninh nhiều nhất (Pha 5).
+  await audit(req.user!, allowed ? 'GATE_PASS' : 'GATE_BLOCK', 'worker', workerId,
+    { presence: w.rows[0].presence }, { direction, presence, reason }, clientIp(req))
   res.json({ allowed, reason, presence, logged_at: logged.rows[0]?.logged_at ?? null })
 })
 
 // Lịch sử vào/ra: theo hợp đồng, NLĐ, hoặc gần đây nhất
-hseRouter.get('/gate/logs', requireAuth, async (req, res) => {
+hseRouter.get('/gate/logs', requireAuth, requireHse('gate', 'inspect', 'approve'), async (req, res) => {
   const contractId = req.query.contractId ? Number(req.query.contractId) : null
   const workerId = req.query.workerId ? Number(req.query.workerId) : null
   const { all, siteId } = siteScope(req.user!)
@@ -1194,7 +1433,11 @@ hseRouter.get('/gate/logs', requireAuth, async (req, res) => {
 })
 
 // Lịch sử vào/ra hợp nhất NLĐ + khách/NCC cho bảo vệ theo dõi tại cổng.
-hseRouter.get('/gate/history', requireAuth, async (req, res) => {
+// Siết requireHse như /gate/logs và /gate/lookup: endpoint trả họ tên, số CCCD,
+// nhà thầu và lý do bị chặn — chỉ requireAuth thì mọi user đã đăng nhập đều đọc
+// được nhật ký ra/vào của toàn bộ NLĐ và khách. Cùng loại rò rỉ Pha 0 đã đóng,
+// nhưng endpoint này thêm sau nên còn sót.
+hseRouter.get('/gate/history', requireAuth, requireHse('gate', 'inspect', 'approve'), async (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
   const { all, siteId } = siteScope(req.user!)
   // NLĐ lọc theo site hợp đồng; khách/NCC lọc theo site của khách.
@@ -1219,6 +1462,20 @@ hseRouter.get('/gate/history', requireAuth, async (req, res) => {
   res.json({ history: r.rows })
 })
 // ═══════════════ KIỂM TRA ATMT (BM111-07.03 / 07.04) ═══════════════
+hseRouter.get('/inspection-training', requireAuth, requireHse('inspect', 'approve'), async (req, res) => {
+  const contractId = Number(req.query.contractId)
+  const workTypeId = Number(req.query.workTypeId)
+  if (!Number.isInteger(contractId) || contractId <= 0 || !Number.isInteger(workTypeId) || workTypeId <= 0)
+    return res.status(400).json({ error: 'Chọn hợp đồng và loại công việc JSA.' })
+  const { all, siteId } = siteScope(req.user!)
+  const contract = await query(`SELECT id FROM atld.hse_contracts
+    WHERE id = $1 AND ($2::boolean OR site_id = $3)`, [contractId, all, siteId])
+  if (!contract.rows[0]) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+  const workType = await query(`SELECT id FROM atld.jsa_work_types WHERE id = $1 AND is_active = true`, [workTypeId])
+  if (!workType.rows[0]) return res.status(404).json({ error: 'Không tìm thấy loại công việc.' })
+  res.json({ training: await checkContractTraining(contractId, workTypeId) })
+})
+
 hseRouter.get('/inspections', requireAuth, async (req, res) => {
   const contractId = req.query.contractId ? Number(req.query.contractId) : null
   const { all, siteId } = siteScope(req.user!)
@@ -1242,24 +1499,37 @@ hseRouter.get('/inspections', requireAuth, async (req, res) => {
 
 hseRouter.get('/inspections/:id', requireAuth, async (req, res) => {
   const id = Number(req.params.id)
+  const { all, siteId } = siteScope(req.user!)
   const insp = await query(
-    `SELECT i.id, i.contract_id, i.form_type,
+    `SELECT i.id, i.contract_id, c.contract_no, i.form_type,
             COALESCE(i.inspection_date, i.scheduled_date, i.conducted_at::date) AS inspection_date,
             COALESCE(i.inspector_name, u.full_name, '') AS inspector_name,
             i.overall_result, i.suspension_required,
-            i.overall_note AS note
+            i.overall_note AS note,
+            i.permit_id, p.permit_number,
+            i.work_type_id, wt.name AS work_type_name, i.training_snapshot
      FROM atld.hse_inspections i
+     JOIN atld.hse_contracts c ON c.id = i.contract_id
      LEFT JOIN atld.users u ON u.id = i.inspector_id
-     WHERE i.id = $1`, [id])
+     LEFT JOIN atld.jsa_permits p ON p.id = i.permit_id
+     LEFT JOIN atld.jsa_work_types wt ON wt.id = i.work_type_id
+     WHERE i.id = $1 AND ($2::boolean OR c.site_id = $3)`, [id, all, siteId])
   if (!insp.rows[0]) return res.status(404).json({ error: 'Không tìm thấy phiếu kiểm tra.' })
   const items = await query(
     `SELECT id, inspection_id,
             COALESCE(item_code, '') AS item_code,
             COALESCE(item_name, description, '') AS item_name,
             COALESCE(category, '') AS category,
-            result, note, requires_suspension
+            result, note, requires_suspension, requires_photo
      FROM atld.hse_inspection_items WHERE inspection_id = $1 ORDER BY id`, [id])
-  res.json({ inspection: insp.rows[0], items: items.rows })
+  // Ảnh minh chứng theo từng hạng mục (Pha 4).
+  const photos = await query(
+    `SELECT p.id, p.item_id, p.file_name, p.caption, p.taken_at
+     FROM atld.hse_inspection_photos p
+     JOIN atld.hse_inspection_items it ON it.id = p.item_id
+     WHERE it.inspection_id = $1
+     ORDER BY p.item_id, p.taken_at`, [id])
+  res.json({ inspection: insp.rows[0], items: items.rows, photos: photos.rows })
 })
 
 hseRouter.post('/inspections', ...canInspect, async (req, res) => {
@@ -1270,6 +1540,20 @@ hseRouter.post('/inspections', ...canInspect, async (req, res) => {
   if (!contractId || !allowed.includes(formType))
     return res.status(400).json({ error: 'Thiếu hợp đồng hoặc loại phiếu không hợp lệ.' })
   const items = Array.isArray(b.items) ? b.items : []
+  // Pha 4: gắn biên bản vào giấy phép / loại công việc (tùy chọn).
+  const permitId = b.permit_id ? Number(b.permit_id) : null
+  const workTypeId = b.work_type_id ? Number(b.work_type_id) : null
+  const { all, siteId } = siteScope(req.user!)
+  const contract = await query(`SELECT id FROM atld.hse_contracts
+    WHERE id = $1 AND ($2::boolean OR site_id = $3)`, [contractId, all, siteId])
+  if (!contract.rows[0]) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+  if (workTypeId) {
+    const wt = await query(`SELECT id FROM atld.jsa_work_types WHERE id = $1 AND is_active = true`, [workTypeId])
+    if (!wt.rows[0]) return res.status(400).json({ error: 'Loại công việc không hợp lệ.' })
+  }
+  const training = workTypeId ? await checkContractTraining(contractId, workTypeId) : null
+  // Chụp kết quả tại thời điểm kiểm tra; không tin trạng thái chứng chỉ từ client.
+  // Phiếu ghi nhận hiện trường vẫn được lưu khi NLĐ thiếu chứng chỉ, kèm cảnh báo.
   // Tính overall_result và suspension_required từ danh sách hạng mục
   const hasFail = items.some((it: { result?: string }) => it.result === 'fail')
   const hasPass = items.some((it: { result?: string }) => it.result === 'pass')
@@ -1279,25 +1563,100 @@ hseRouter.post('/inspections', ...canInspect, async (req, res) => {
     `INSERT INTO atld.hse_inspections
        (contract_id, inspector_id, inspector_name, form_type,
         inspection_date, scheduled_date, conducted_at, status,
-        overall_result, suspension_required, overall_note)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+        overall_result, suspension_required, overall_note, permit_id, work_type_id, training_snapshot)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
     [contractId, req.user!.id, escapeText(String(b.inspector_name ?? '')),
      formType, b.inspection_date || null, b.inspection_date || null, null,
-     'completed', overallResult, suspReq, escapeText(String(b.note ?? b.overall_note ?? ''))],
+     'completed', overallResult, suspReq, escapeText(String(b.note ?? b.overall_note ?? '')),
+     permitId, workTypeId, training ? JSON.stringify(training) : null],
   )
+  const itemIds: number[] = []
   for (const it of items) {
-    await query(
+    const ir = await query<{ id: number }>(
       `INSERT INTO atld.hse_inspection_items
-         (inspection_id, item_code, item_name, category, description, result, note, requires_suspension)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         (inspection_id, item_code, item_name, category, description, result, note, requires_suspension, requires_photo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
       [r.rows[0]!.id,
        escapeText(String(it.item_code ?? '')), escapeText(String(it.item_name ?? '')),
        escapeText(String(it.category ?? '')), escapeText(String(it.item_name ?? '')),
-       it.result || null, escapeText(String(it.note ?? '')), !!it.requires_suspension],
+       it.result || null, escapeText(String(it.note ?? '')), !!it.requires_suspension,
+       !!it.requires_photo],
     )
+    itemIds.push(ir.rows[0]!.id)
   }
-  await audit(req.user!, 'INSPECTION_CREATE', 'inspection', r.rows[0]!.id, null, { contractId, formType }, clientIp(req))
-  res.status(201).json({ id: r.rows[0]!.id })
+  await audit(req.user!, 'INSPECTION_CREATE', 'inspection', r.rows[0]!.id, null,
+    { contractId, formType, permitId, workTypeId }, clientIp(req))
+  // Trả itemIds để client upload ảnh cho từng hạng mục ngay sau khi lưu.
+  res.status(201).json({ id: r.rows[0]!.id, itemIds })
+})
+
+// ═══════════════ ẢNH MINH CHỨNG HẠNG MỤC KIỂM TRA (Pha 4) ═══════════════
+// Upload ảnh cho một hạng mục. Chỉ nhận ảnh (png/jpg/jpeg/webp) — multer đã lọc ALLOWED_EXT.
+hseRouter.post('/inspection-items/:itemId/photos', ...canInspect, upload.single('file'), async (req, res) => {
+  const itemId = Number(req.params.itemId)
+  if (!req.file) return res.status(400).json({ error: 'Chưa chọn ảnh.' })
+  const ext = path.extname(req.file.originalname).toLowerCase().replace('.', '')
+  if (!['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+    fs.existsSync(path.join(UPLOAD_DIR, req.file.filename)) && fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename))
+    return res.status(400).json({ error: 'Chỉ nhận ảnh png/jpg/jpeg/webp.' })
+  }
+  // Kiểm tra hạng mục tồn tại và thuộc site user được phép.
+  const { all, siteId } = siteScope(req.user!)
+  const it = await query<{ id: number; inspection_id: number }>(
+    `SELECT it.id, it.inspection_id
+     FROM atld.hse_inspection_items it
+     JOIN atld.hse_inspections i ON i.id = it.inspection_id
+     JOIN atld.hse_contracts c ON c.id = i.contract_id
+     WHERE it.id = $1 AND ($2::boolean OR c.site_id = $3)`, [itemId, all, siteId])
+  if (!it.rows[0]) {
+    fs.existsSync(path.join(UPLOAD_DIR, req.file.filename)) && fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename))
+    return res.status(404).json({ error: 'Không tìm thấy hạng mục kiểm tra.' })
+  }
+  const r = await query<{ id: number }>(
+    `INSERT INTO atld.hse_inspection_photos (item_id, file_name, stored_name, caption, uploaded_by)
+     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+    [itemId, sanitizeFileName(req.file.originalname), req.file.filename,
+     escapeText(String(req.body.caption ?? '')), req.user!.id],
+  )
+  await audit(req.user!, 'INSPECTION_PHOTO_UPLOAD', 'inspection', it.rows[0].inspection_id, null,
+    { itemId, photoId: r.rows[0]!.id, file_name: req.file.originalname }, clientIp(req))
+  res.status(201).json({ id: r.rows[0]!.id, file_name: sanitizeFileName(req.file.originalname) })
+})
+
+// Xem ảnh minh chứng (trả inline để hiển thị trực tiếp).
+hseRouter.get('/inspection-photos/:id/file', requireAuth, async (req, res) => {
+  const id = Number(req.params.id)
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query<{ file_name: string; stored_name: string }>(
+    `SELECT p.file_name, p.stored_name
+     FROM atld.hse_inspection_photos p
+     JOIN atld.hse_inspection_items it ON it.id = p.item_id
+     JOIN atld.hse_inspections i ON i.id = it.inspection_id
+     JOIN atld.hse_contracts c ON c.id = i.contract_id
+     WHERE p.id = $1 AND ($2::boolean OR c.site_id = $3)`, [id, all, siteId])
+  if (!r.rows[0]) return res.status(404).json({ error: 'Không tìm thấy ảnh.' })
+  const filePath = path.join(UPLOAD_DIR, r.rows[0].stored_name)
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Tệp không còn trên máy chủ.' })
+  res.sendFile(filePath)
+})
+
+// Xóa ảnh minh chứng.
+hseRouter.delete('/inspection-photos/:id', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query<{ stored_name: string; inspection_id: number }>(
+    `SELECT p.stored_name, i.id AS inspection_id
+     FROM atld.hse_inspection_photos p
+     JOIN atld.hse_inspection_items it ON it.id = p.item_id
+     JOIN atld.hse_inspections i ON i.id = it.inspection_id
+     JOIN atld.hse_contracts c ON c.id = i.contract_id
+     WHERE p.id = $1 AND ($2::boolean OR c.site_id = $3)`, [id, all, siteId])
+  if (!r.rows[0]) return res.status(404).json({ error: 'Không tìm thấy ảnh.' })
+  const filePath = path.join(UPLOAD_DIR, r.rows[0].stored_name)
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+  await query(`DELETE FROM atld.hse_inspection_photos WHERE id = $1`, [id])
+  await audit(req.user!, 'INSPECTION_PHOTO_DELETE', 'inspection', r.rows[0].inspection_id, null, { photoId: id }, clientIp(req))
+  res.json({ ok: true })
 })
 
 // ═══════════════ ĐÌNH CHỈ CÔNG VIỆC (R6 — chặn tức thì) ═══════════════
@@ -1373,15 +1732,50 @@ hseRouter.patch('/suspensions/:id/lift', ...canApprove, async (req, res) => {
 hseRouter.get('/audit', requireAuth, requireSection('an-toan'), async (req, res) => {
   const entity = String(req.query.entityType ?? '')
   const entityId = req.query.entityId ? Number(req.query.entityId) : null
+  const actorId = req.query.actorId ? Number(req.query.actorId) : null
+  const action = String(req.query.action ?? '')
+  // Khoảng ngày (yyyy-mm-dd). dateTo lấy hết ngày đó nên so sánh < dateTo + 1 ngày.
+  const dateFrom = String(req.query.dateFrom ?? '')
+  const dateTo = String(req.query.dateTo ?? '')
+  const pageSize = Math.min(Math.max(Number(req.query.pageSize) || 50, 1), 200)
+  const page = Math.max(Number(req.query.page) || 1, 1)
+
+  // Cùng một bộ điều kiện dùng cho cả đếm tổng và lấy trang → khai báo một lần.
+  const where = `($1 = '' OR a.entity_type = $1)
+       AND ($2::int IS NULL OR a.entity_id = $2)
+       AND ($3::int IS NULL OR a.actor_id = $3)
+       AND ($4 = '' OR a.action = $4)
+       AND ($5 = '' OR a.created_at >= $5::date)
+       AND ($6 = '' OR a.created_at < ($6::date + INTERVAL '1 day'))`
+  const params = [entity, entityId, actorId, action, dateFrom, dateTo]
+
+  const total = await query<{ cnt: string }>(
+    `SELECT COUNT(*)::text AS cnt FROM atld.hse_audit_logs a WHERE ${where}`, params)
   const r = await query(
     `SELECT a.id, a.actor_id, u.full_name AS actor_name, a.action, a.entity_type, a.entity_id,
             a.old_value, a.new_value, a.ip_address, a.created_at
      FROM atld.hse_audit_logs a LEFT JOIN atld.users u ON u.id = a.actor_id
-     WHERE ($1 = '' OR a.entity_type = $1) AND ($2::int IS NULL OR a.entity_id = $2)
-     ORDER BY a.created_at DESC LIMIT 200`,
-    [entity, entityId],
+     WHERE ${where}
+     ORDER BY a.created_at DESC LIMIT $7 OFFSET $8`,
+    [...params, pageSize, (page - 1) * pageSize],
   )
-  res.json({ logs: r.rows })
+  res.json({ logs: r.rows, total: Number(total.rows[0]?.cnt ?? '0'), page, pageSize })
+})
+
+// GET /hse/audit/facets — giá trị lọc có thật trong log, để dựng dropdown.
+hseRouter.get('/audit/facets', requireAuth, requireSection('an-toan'), async (_req, res) => {
+  const actions = await query<{ action: string }>(
+    `SELECT DISTINCT action FROM atld.hse_audit_logs ORDER BY action`)
+  const entityTypes = await query<{ entity_type: string }>(
+    `SELECT DISTINCT entity_type FROM atld.hse_audit_logs ORDER BY entity_type`)
+  const actors = await query<{ id: number; full_name: string }>(
+    `SELECT DISTINCT u.id, u.full_name FROM atld.hse_audit_logs a
+     JOIN atld.users u ON u.id = a.actor_id ORDER BY u.full_name`)
+  res.json({
+    actions: actions.rows.map((r) => r.action),
+    entityTypes: entityTypes.rows.map((r) => r.entity_type),
+    actors: actors.rows,
+  })
 })
 
 // ═══════════════ THIẾT BỊ (Phase A) ═══════════════
@@ -1738,7 +2132,7 @@ hseRouter.get('/commitments/:id/smartca/status', requireAuth, async (req, res) =
 hseRouter.post('/smartca/callback', async (req, res) => {
   const sig = String(req.headers['x-smartca-signature'] ?? '')
   const rawBody = JSON.stringify(req.body)
-  if (!verifyWebhookSignature(rawBody, sig)) {
+  if (!(await verifyWebhookSignature(rawBody, sig))) {
     return res.status(401).json({ error: 'Chữ ký webhook không hợp lệ.' })
   }
   const { transactionId, status, signature, certSerial, certSubject } = req.body ?? {}
@@ -1784,15 +2178,29 @@ hseRouter.patch('/visitors/:id/face', ...canInspect, async (req, res) => {
       !descriptor.every((v: unknown) => typeof v === 'number')) {
     return res.status(400).json({ error: 'Descriptor phải là mảng 128 số thực.' })
   }
+  // Descriptor là dữ liệu sinh trắc → ghi audit như bản worker (Pha 5), nhưng
+  // chỉ lưu dấu vết đã cập nhật, không lưu 128 số vào log.
+  const prev = await query<{ had: boolean }>(
+    `SELECT face_descriptor IS NOT NULL AS had FROM atld.hse_visitors WHERE id = $1`, [id])
+  if (!prev.rows[0]) return res.status(404).json({ error: 'Không tìm thấy khách.' })
   await query(
     `UPDATE atld.hse_visitors SET face_descriptor = $1::jsonb WHERE id = $2`,
     [JSON.stringify(descriptor), id])
+  await audit(req.user!, 'VISITOR_FACE_UPDATE', 'visitor', id,
+    { hadDescriptor: prev.rows[0].had }, { hadDescriptor: true }, clientIp(req))
   res.json({ ok: true })
 })
 
 /**
  * GET /hse/gate/descriptors — Trả về face descriptors của workers + visitors
- * đang có status allowed cho site hiện tại. Dùng bởi GatePage để nhận diện offline.
+ * cho site hiện tại. Dùng bởi GatePage để nhận diện offline.
+ *
+ * KHÔNG lọc theo access_status: nhận diện chỉ làm nhiệm vụ *định danh*, còn việc
+ * cho vào hay chặn do /gate/lookup + evalWorkerEligibility quyết định sau đó —
+ * đúng như cách /gate/lookup trả về mọi NLĐ rồi UI hiện "✓ ĐƯỢC VÀO"/"✗ KHÔNG VÀO".
+ * Nếu lọc 'allowed' ở đây thì người bị chặn/đình chỉ trở nên vô hình với camera:
+ * bảo vệ quét mãi không ra ai, không phân biệt được "không có trong hệ thống"
+ * với "có nhưng đang bị chặn" — tức là mất đúng trường hợp cần chặn nhất.
  */
 hseRouter.get('/gate/descriptors', requireAuth, requireHse('gate', 'inspect', 'approve'), async (req, res) => {
   const { all, siteId } = siteScope(req.user!)
@@ -1800,7 +2208,6 @@ hseRouter.get('/gate/descriptors', requireAuth, requireHse('gate', 'inspect', 'a
     `SELECT w.id, w.full_name, w.face_descriptor AS descriptor
      FROM atld.hse_workers w
      WHERE w.face_descriptor IS NOT NULL
-       AND w.access_status = 'allowed'
        AND ($1::boolean OR EXISTS (
          SELECT 1 FROM atld.hse_contract_workers cw
          JOIN atld.hse_contracts c ON c.id = cw.contract_id
@@ -1810,7 +2217,6 @@ hseRouter.get('/gate/descriptors', requireAuth, requireHse('gate', 'inspect', 'a
     `SELECT id, full_name, face_descriptor AS descriptor, qr_code
      FROM atld.hse_visitors
      WHERE face_descriptor IS NOT NULL
-       AND access_status = 'allowed'
        AND ($1::boolean OR site_id = $2)`,
     [all, siteId])
   res.json({
@@ -2023,7 +2429,8 @@ hseRouter.get('/dashboard', requireAuth, async (req, res) => {
   const kpi: Record<string, number> = {}
   for (const row of counts.rows) kpi[row.k] = Number(row.v)
 
-  // Cảnh báo hết hạn: gom worker/equipment/contractor docs còn approved, hết hạn trong warn_days_before.
+  // Cảnh báo hết hạn: gom worker/equipment/contractor docs còn approved, hết hạn trong warn_days_before,
+  // PLUS chứng chỉ huấn luyện (progress.expires_at).
   const expiring = await query<{ scope: string; entity: string; doc_name: string; expiry_date: string; days_left: number }>(`
     SELECT scope, entity, doc_name, expiry_date, days_left FROM (
       SELECT 'Người lao động' AS scope, w.full_name AS entity, dt.name AS doc_name, d.expiry_date,
@@ -2048,6 +2455,13 @@ hseRouter.get('/dashboard', requireAuth, async (req, res) => {
       JOIN atld.hse_contractors ct ON ct.id = c.contractor_id
       WHERE d.status = 'approved' AND d.expiry_date IS NOT NULL
         AND ($1::boolean OR c.site_id = $2)
+      UNION ALL
+      SELECT 'Chứng chỉ huấn luyện', u.full_name, co.title, p.expires_at,
+             (p.expires_at - CURRENT_DATE), 30
+      FROM atld.progress p
+      JOIN atld.users u ON u.id = p.user_id
+      JOIN atld.courses co ON co.id = p.course_id
+      WHERE p.passed = true AND p.expires_at IS NOT NULL
     ) x
     WHERE (expiry_date - CURRENT_DATE) <= warn
     ORDER BY days_left ASC LIMIT 100`, [all, siteId])

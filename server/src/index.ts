@@ -5,10 +5,12 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import { authRouter, initAuthDb } from './routes/auth.js'
+import { oauthRouter, initOAuthDb } from './routes/oauth.js'
 import { homeRouter } from './routes/home.js'
 import { coursesRouter } from './routes/courses.js'
 import { documentsRouter } from './routes/documents.js'
 import { hseRouter } from './routes/hse.js'
+import { jsaRouter } from './routes/jsa.js'
 import { newsRouter } from './routes/news.js'
 import { adminRouter } from './routes/admin.js'
 import { configRouter } from './routes/config.js'
@@ -28,7 +30,8 @@ app.use(
       ? {
           directives: {
             defaultSrc: ["'self'"],
-            imgSrc: ["'self'", 'data:', 'https:'],
+            // Camera và ảnh minh chứng tải kèm JWT dùng URL.createObjectURL().
+            imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
             scriptSrc: ["'self'"],
             styleSrc: ["'self'", "'unsafe-inline'"],
             connectSrc: ["'self'"],
@@ -49,14 +52,21 @@ app.use(express.json({ limit: '1mb' }))
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'atld-api' }))
 app.use('/api/auth', authRouter)
+app.use('/api/auth/oauth', oauthRouter)
 app.use('/api/home', homeRouter)
 app.use('/api/courses', coursesRouter)
 app.use('/api/documents', documentsRouter)
 app.use('/api/hse', hseRouter)
+app.use('/api/jsa', jsaRouter)
 app.use('/api/news', newsRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/config', configRouter)
 app.use('/api/media', mediaRouter)
+
+// Serve uploads tĩnh (video, media, content) — không cần auth để stream trong <video>/<iframe>
+app.use('/uploads', express.static(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
+))
 
 // Production: phục vụ bản build React (frontend) từ cùng máy chủ này.
 // dist backend nằm ở server/dist, build frontend nằm ở gốc dự án ../../dist.
@@ -87,6 +97,12 @@ app.listen(port, async () => {
     console.log('[atld-auth] Migration auth_provider OK')
   } catch (e) {
     console.warn('[atld-auth] Migration warning:', (e as Error).message)
+  }
+  try {
+    await initOAuthDb()
+    console.log('[atld-oauth] Migration OAuth columns OK')
+  } catch (e) {
+    console.warn('[atld-oauth] Migration warning:', (e as Error).message)
   }
   console.log(`[atld-api] Máy chủ chạy tại http://localhost:${port}`)
 })
