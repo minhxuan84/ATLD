@@ -237,9 +237,43 @@ export async function evalEquipmentEligibility(
   return { ok: missing.length === 0, missing }
 }
 
+/**
+ * Lệnh đình chỉ còn hiệu lực của một NLĐ, nếu có.
+ * Đình chỉ hiện neo trên hợp đồng (hse_suspensions.contract_id) nên phải nối qua
+ * hse_contract_workers để biết NLĐ nào đang bị chặn.
+ */
+export async function activeSuspensionReason(workerId: number): Promise<string | null> {
+  const r = await query<{ reason: string; scope: string }>(
+    `SELECT s.reason, s.scope FROM atld.hse_suspensions s
+     JOIN atld.hse_contract_workers cw ON cw.contract_id = s.contract_id
+     WHERE cw.worker_id = $1 AND s.status = 'issued'
+     ORDER BY s.created_at DESC LIMIT 1`,
+    [workerId],
+  )
+  const s = r.rows[0]
+  return s ? `Đang bị đình chỉ: ${s.reason}` : null
+}
+
 // ── Đồng bộ trạng thái cổng worker/equipment (R3) ────────
 // Trả về trạng thái vừa ghi để caller khỏi SELECT lại (và để endpoint trả về cho UI).
-export async function syncWorkerAccess(workerId: number): Promise<'allowed' | 'blocked'> {
+export async function syncWorkerAccess(
+  workerId: number,
+): Promise<'allowed' | 'blocked' | 'suspended'> {
+  // Cổng kiểm soát đọc chính access_status để biết ai bị đình chỉ (xem /gate/log và
+  // /gate/lookup trong hse.ts). Nếu ở đây ghi 'allowed'/'blocked' vô điều kiện thì mỗi
+  // lần duyệt hồ sơ, gán NLĐ vào hợp đồng hay chạy sync toàn bộ đều âm thầm gỡ đình chỉ
+  // — người bị đình chỉ vào lại nhà máy được trong khi lệnh vẫn còn 'issued'.
+  // Vì vậy đình chỉ luôn thắng kết quả xét hồ sơ.
+  const suspendReason = await activeSuspensionReason(workerId)
+  if (suspendReason) {
+    await query(
+      `UPDATE atld.hse_workers SET access_status = 'suspended', access_block_reason = $1,
+                                   updated_at = now()
+       WHERE id = $2`,
+      [suspendReason, workerId],
+    )
+    return 'suspended'
+  }
   const el = await evalWorkerEligibility(workerId)
   const status = el.ok ? 'allowed' : 'blocked'
   await query(
@@ -250,13 +284,19 @@ export async function syncWorkerAccess(workerId: number): Promise<'allowed' | 'b
   return status
 }
 
-export async function syncEquipmentAccess(equipmentId: number): Promise<void> {
+// Trả trạng thái vừa ghi như syncWorkerAccess: PATCH /equipment-docs/:id đã serialize
+// kết quả nên nếu để Promise<void> thì access_status luôn vắng trong response.
+export async function syncEquipmentAccess(
+  equipmentId: number,
+): Promise<'allowed' | 'blocked'> {
   const el = await evalEquipmentEligibility(equipmentId)
+  const status = el.ok ? 'allowed' : 'blocked'
   await query(
     `UPDATE atld.hse_equipments SET access_status = $1, access_block_reason = $2, updated_at = now()
      WHERE id = $3`,
-    [el.ok ? 'allowed' : 'blocked', el.ok ? null : el.missing.join('; '), equipmentId],
+    [status, el.ok ? null : el.missing.join('; '), equipmentId],
   )
+  return status
 }
 
 // ── Helper nối atld.users ↔ hse_workers qua CCCD (Pha 0) ─

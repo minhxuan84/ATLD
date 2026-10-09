@@ -698,6 +698,32 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
         ('WRK_CERT_FIRE',     'Chứng nhận huấn luyện PCCC',             'worker', false, 60, 208, 'Chứng chỉ chuyên môn', ''),
         ('WRK_CERT_FIRSTAID', 'Chứng nhận sơ cấp cứu',                  'worker', false, 60, 209, 'Chứng chỉ chuyên môn', '')
       ON CONFLICT (code) DO NOTHING`)
+
+    // ── Pha A: khóa tập giá trị access_status ──────────────
+    // Cổng kiểm soát rẽ nhánh theo đúng cột này, nên một giá trị lạ (do code mới ghi sai
+    // hoặc sửa tay trong DB) sẽ âm thầm thành "không bị đình chỉ" và cho qua cổng.
+    // Có CHECK thì sai giá trị là lỗi DB ngay, không trôi tới cổng.
+    // 'revoked' đã nằm trong tập để Pha E thêm thu hồi quyền không phải sửa constraint.
+    await query(`
+      UPDATE atld.hse_workers SET access_status = 'blocked'
+      WHERE access_status NOT IN ('allowed', 'blocked', 'suspended', 'revoked')`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_workers ADD CONSTRAINT hse_workers_access_status_chk
+          CHECK (access_status IN ('allowed', 'blocked', 'suspended', 'revoked'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`
+      UPDATE atld.hse_equipments SET access_status = 'blocked'
+      WHERE access_status NOT IN ('allowed', 'blocked', 'suspended', 'revoked')`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_equipments ADD CONSTRAINT hse_equipments_access_status_chk
+          CHECK (access_status IN ('allowed', 'blocked', 'suspended', 'revoked'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+
+    // Đình chỉ tra theo worker qua hợp đồng ở mọi lần syncWorkerAccess → cần index.
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_suspensions_status
+      ON atld.hse_suspensions(contract_id, status)`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }
