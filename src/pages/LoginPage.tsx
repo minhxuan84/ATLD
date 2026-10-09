@@ -131,16 +131,20 @@ export default function LoginPage() {
           {/* Username — label thay đổi theo mode */}
           <div>
             <label htmlFor="username" className="block text-sm font-medium text-slate-700">
-              {mode === 'ldap' ? 'Tên đăng nhập (Windows)' : 'Số điện thoại'}
+              {mode === 'ldap' ? 'Tên đăng nhập (Windows)' : 'Tên đăng nhập'}
             </label>
+            {/* type="text", KHÔNG phải "tel": username không chỉ là số điện thoại — tài
+                khoản tạo qua Google/Microsoft lấy email làm username (xem oauth.ts), nên
+                inputMode="numeric" khóa bàn phím số trên điện thoại và không gõ nổi email. */}
             <input
               id="username"
-              type={mode === 'ldap' ? 'text' : 'tel'}
-              inputMode={mode === 'ldap' ? undefined : 'numeric'}
+              type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
-              placeholder={mode === 'ldap' ? 'vd: nguyen.van.a' : 'Nhập số điện thoại'}
+              autoCapitalize="none"
+              spellCheck={false}
+              placeholder={mode === 'ldap' ? 'vd: nguyen.van.a' : 'Số điện thoại hoặc email'}
               required
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
             />

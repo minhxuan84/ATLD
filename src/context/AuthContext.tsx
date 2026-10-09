@@ -21,7 +21,14 @@ export function seesAllSites(user: AuthUser | null): boolean {
 // Tiện ích: user có quyền vào một mục CMS không (admin luôn có).
 export function canAccess(user: AuthUser | null, section: CmsSection): boolean {
   if (!user) return false
-  return user.role === 'admin' || user.permissions?.includes(section)
+  if (user.role === 'admin') return true
+  const p = user.permissions ?? []
+  if (p.includes(section)) return true
+  // Quyền con mở được cửa vào mục cha: cán bộ chỉ có 'an-toan:gate' (bảo vệ) vẫn phải
+  // vào được module ATVSLĐ, nếu không thì cấp quyền xong mà đăng nhập vào không thấy gì
+  // — cửa vào đòi đúng chuỗi 'an-toan' trong khi trang con lại xét bằng canHse().
+  // Đây chỉ là quyền ĐI VÀO; thao tác bên trong vẫn do canHse() và requireHse() gác.
+  return p.some((k) => k.startsWith(`${section}:`))
 }
 // Kiểm tra sub-permission HSE. Admin và 'an-toan' toàn quyền luôn pass.
 export function canHse(user: AuthUser | null, ...subKeys: ('gate' | 'inspect' | 'approve')[]): boolean {

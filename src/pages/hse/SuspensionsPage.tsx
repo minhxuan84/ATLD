@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
 import { exportFormPdf } from '../../lib/formPdf'
 import { fmtDate, fmtDateTime } from '../../lib/date'
+import EmptyContractsHint from '../../components/hse/EmptyContractsHint'
 
 interface Contract {
   id: number; contract_no: string; title: string; contractor_name: string; status: string
@@ -321,6 +322,9 @@ export default function SuspensionsPage() {
                     <option key={c.id} value={c.id}>{c.contract_no} — {c.contractor_name} ({c.title})</option>
                   ))}
                 </select>
+                {/* Ở đây còn lọc thêm status='active', nên nói rõ "đang hoạt động" để cán bộ
+                    không đi tìm hợp đồng vừa tạo mà còn ở trạng thái 'pending'. */}
+                {contracts.length === 0 && <EmptyContractsHint activeOnly />}
               </div>
               <div>
                 <label className="mb-1 block text-sm font-medium text-slate-700">Phạm vi đình chỉ *</label>

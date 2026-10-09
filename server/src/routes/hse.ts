@@ -1373,11 +1373,16 @@ const RESULT_VI: Record<string, string> = {
   pass: 'Đạt', fail: 'Không đạt', partial: 'Đạt một phần', na: 'Không áp dụng',
 }
 
-hseRouter.get('/contracts/:id/report', requireAuth, requireSection('an-toan'), async (req, res) => {
+// canInspect, không requireSection('an-toan'): đây là một bản đọc hồ sơ hợp đồng, cùng
+// loại với /contracts/:id/workers. Gác bằng quyền cha khiến cán bộ được cấp
+// 'an-toan:inspect' thấy nút xuất báo cáo nhưng bấm vào nhận 403.
+hseRouter.get('/contracts/:id/report', ...canInspect, async (req, res) => {
   const id = Number(req.params.id)
   if (!id) return res.status(400).json({ error: 'Thiếu mã hợp đồng.' })
 
-  // Hợp đồng + nhà thầu
+  // Hợp đồng + nhà thầu. Lọc theo site như mọi endpoint hợp đồng khác: thiếu điều kiện
+  // này thì cán bộ nhà máy A đoán id là xuất được trọn hồ sơ hợp đồng của nhà máy B.
+  const { all, siteId } = siteScope(req.user!)
   const c = await query<{
     id: number; contract_no: string; title: string; work_location: string | null
     start_date: string; end_date: string; status: string; contractor_id: number
@@ -1388,7 +1393,7 @@ hseRouter.get('/contracts/:id/report', requireAuth, requireSection('an-toan'), a
             c.contractor_id, ct.name AS contractor_name, ct.code, ct.tax_id, ct.address,
             ct.phone, ct.email, ct.rep_name, ct.rep_title
      FROM atld.hse_contracts c JOIN atld.hse_contractors ct ON ct.id = c.contractor_id
-     WHERE c.id = $1`, [id])
+     WHERE c.id = $1 AND ($2::boolean OR c.site_id = $3)`, [id, all, siteId])
   if (!c.rows[0]) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
   const ct = c.rows[0]
 

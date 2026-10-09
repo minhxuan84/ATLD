@@ -4,6 +4,7 @@ import { api } from '../../lib/api'
 import { exportCommitmentPdf } from '../../lib/formPdf'
 import { fmtDate } from '../../lib/date'
 import SmartCAModal from '../../components/hse/SmartCAModal'
+import EmptyContractsHint from '../../components/hse/EmptyContractsHint'
 
 interface Contract { id: number; contract_no: string; title: string; contractor_name: string }
 interface Commitment {
@@ -88,6 +89,10 @@ export default function CommitmentsPage() {
               <option value="">-- Chọn hợp đồng *</option>
               {contracts.map((c) => <option key={c.id} value={c.id}>{c.contract_no} — {c.contractor_name}</option>)}
             </select>
+            {/* Danh sách hợp đồng bị lọc theo site của cán bộ (siteScope ở server). Rỗng mà
+                không nói gì thì người dùng tưởng phần mềm lỗi, trong khi thực tế là chưa có
+                hợp đồng nào thuộc nhà máy mình phụ trách. */}
+            {contracts.length === 0 && <EmptyContractsHint />}
             <div className="mt-4 flex justify-end gap-2">
               <button onClick={() => setShowNew(false)} className="rounded px-3 py-1.5 text-sm text-slate-500">Hủy</button>
               <button onClick={create} disabled={!newContract}

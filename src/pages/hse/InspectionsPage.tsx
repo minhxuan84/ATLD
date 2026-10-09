@@ -5,6 +5,7 @@ import InspectionPhoto from '../../components/hse/InspectionPhoto'
 import TrainingCheckPanel, { type TrainingCheck } from '../../components/hse/TrainingCheckPanel'
 import { exportFormPdf, type FormSection } from '../../lib/formPdf'
 import { fmtDate } from '../../lib/date'
+import EmptyContractsHint from '../../components/hse/EmptyContractsHint'
 
 // Mã biểu mẫu QT111-07 theo loại phiếu
 const FORM_CODES: Record<string, string> = {
@@ -433,6 +434,7 @@ export default function InspectionsPage() {
                       <option key={c.id} value={c.id}>{c.contract_no} — {c.title}</option>
                     ))}
                   </select>
+                  {contracts.length === 0 && <EmptyContractsHint />}
                 </div>
                 <div>
                   <label className="block text-sm font-medium mb-1">Loại biên bản</label>
