@@ -239,19 +239,24 @@ export async function evalEquipmentEligibility(
 
 /**
  * Lệnh đình chỉ còn hiệu lực của một NLĐ, nếu có.
- * Đình chỉ hiện neo trên hợp đồng (hse_suspensions.contract_id) nên phải nối qua
- * hse_contract_workers để biết NLĐ nào đang bị chặn.
+ * Hai phạm vi: đình chỉ cá nhân (worker_id trỏ thẳng vào NLĐ) và đình chỉ cả hợp đồng
+ * (contract_id, phải nối qua hse_contract_workers để biết ai bị chặn).
  */
 export async function activeSuspensionReason(workerId: number): Promise<string | null> {
-  const r = await query<{ reason: string; scope: string }>(
-    `SELECT s.reason, s.scope FROM atld.hse_suspensions s
-     JOIN atld.hse_contract_workers cw ON cw.contract_id = s.contract_id
-     WHERE cw.worker_id = $1 AND s.status = 'issued'
+  const r = await query<{ reason: string; target_scope: string }>(
+    `SELECT s.reason, s.target_scope FROM atld.hse_suspensions s
+     WHERE s.status = 'issued'
+       AND (s.worker_id = $1
+            OR (s.contract_id IS NOT NULL AND EXISTS (
+              SELECT 1 FROM atld.hse_contract_workers cw
+              WHERE cw.contract_id = s.contract_id AND cw.worker_id = $1)))
      ORDER BY s.created_at DESC LIMIT 1`,
     [workerId],
   )
   const s = r.rows[0]
-  return s ? `Đang bị đình chỉ: ${s.reason}` : null
+  if (!s) return null
+  const who = s.target_scope === 'worker' ? 'cá nhân' : 'cả nhà thầu'
+  return `Đang bị đình chỉ (${who}): ${s.reason}`
 }
 
 // ── Đồng bộ trạng thái cổng worker/equipment (R3) ────────

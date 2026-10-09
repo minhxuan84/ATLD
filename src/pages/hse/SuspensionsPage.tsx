@@ -7,18 +7,29 @@ import { fmtDate, fmtDateTime } from '../../lib/date'
 interface Contract {
   id: number; contract_no: string; title: string; contractor_name: string; status: string
 }
+interface Worker {
+  id: number; full_name: string; id_number: string | null; job_title: string | null
+  contractor_name: string | null
+}
 interface Suspension {
-  id: number; contract_id: number; contract_no: string; contractor_name: string
+  id: number; contract_id: number | null; contract_no: string | null; contractor_name: string | null
+  target_scope: 'contract' | 'worker'
+  worker_id: number | null; worker_name: string | null; worker_id_number: string | null
   reason: string; scope: string; issued_at: string; issued_by_name: string
   status: 'issued' | 'lifted'; lifted_at: string | null; lift_note: string | null
 }
 
 export default function SuspensionsPage() {
   const [contracts, setContracts] = useState<Contract[]>([])
+  const [workers, setWorkers] = useState<Worker[]>([])
   const [suspensions, setSuspensions] = useState<Suspension[]>([])
   const [filterStatus, setFilterStatus] = useState<'all' | 'issued' | 'lifted'>('issued')
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState({ contract_id: '', reason: '', scope: 'toan_bo' })
+  const [form, setForm] = useState({
+    target_scope: 'contract' as 'contract' | 'worker',
+    contract_id: '', worker_id: '', reason: '', scope: 'toan_bo',
+  })
+  const [workerQ, setWorkerQ] = useState('')
   const [liftTarget, setLiftTarget] = useState<Suspension | null>(null)
   const [liftNote, setLiftNote] = useState('')
   const [busy, setBusy] = useState(false)
@@ -34,11 +45,18 @@ export default function SuspensionsPage() {
     api<{ contracts: Contract[] }>('/hse/contracts').then((d) =>
       setContracts(d.contracts.filter((c) => c.status === 'active'))
     )
+    // Gồm cả NLĐ nội bộ: đình chỉ cá nhân không đòi phải thuộc hợp đồng nhà thầu nào.
+    api<{ workers: Worker[] }>('/hse/workers').then((d) => setWorkers(d.workers))
   }, [load])
 
   const createSuspension = async () => {
-    if (!form.contract_id || !form.reason.trim() || !form.scope.trim()) {
-      setErr('Chọn hợp đồng, phạm vi và nhập lý do đình chỉ.')
+    const isWorker = form.target_scope === 'worker'
+    if (isWorker ? !form.worker_id : !form.contract_id) {
+      setErr(isWorker ? 'Chọn người lao động bị đình chỉ.' : 'Chọn hợp đồng bị đình chỉ.')
+      return
+    }
+    if (!form.reason.trim() || !form.scope.trim()) {
+      setErr('Nhập phạm vi và lý do đình chỉ.')
       return
     }
     setErr(''); setBusy(true)
@@ -46,13 +64,20 @@ export default function SuspensionsPage() {
       await api('/hse/suspensions', {
         method: 'POST',
         body: {
-          contract_id: Number(form.contract_id),
+          target_scope: form.target_scope,
+          // Đình chỉ cá nhân vẫn gửi contract_id nếu cán bộ có chọn, để lưu bối cảnh
+          // lệnh; server không dùng nó để xác định ai bị chặn.
+          contract_id: form.contract_id ? Number(form.contract_id) : null,
+          worker_id: isWorker ? Number(form.worker_id) : null,
           reason: form.reason.trim(),
-          scope: form.scope === 'toan_bo' ? 'Toàn bộ hợp đồng' : form.scope.trim(),
+          scope: form.scope === 'toan_bo'
+            ? (isWorker ? 'Cá nhân người lao động' : 'Toàn bộ hợp đồng')
+            : form.scope.trim(),
         },
       })
       setShowForm(false)
-      setForm({ contract_id: '', reason: '', scope: 'toan_bo' })
+      setForm({ target_scope: 'contract', contract_id: '', worker_id: '', reason: '', scope: 'toan_bo' })
+      setWorkerQ('')
       await load()
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
@@ -61,9 +86,10 @@ export default function SuspensionsPage() {
     if (!liftTarget) return
     setBusy(true)
     try {
+      // Server đọc `lift_note`; gửi `note` như trước làm ghi chú gỡ lệnh bị rơi mất.
       await api(`/hse/suspensions/${liftTarget.id}/lift`, {
         method: 'PATCH',
-        body: { note: liftNote.trim() || null },
+        body: { lift_note: liftNote.trim() },
       })
       setLiftTarget(null); setLiftNote('')
       await load()
@@ -72,11 +98,20 @@ export default function SuspensionsPage() {
 
   const exportSuspensionPdf = async (s: Suspension) => {
     const date = fmtDate(s.issued_at)
+    const isWorker = s.target_scope === 'worker'
+    // Lệnh cá nhân không bắt buộc gắn hợp đồng → tên file và mã xác thực lấy theo NLĐ.
+    const ref = isWorker ? (s.worker_id_number || `NLD${s.worker_id}`) : (s.contract_no ?? `ID${s.id}`)
     await exportFormPdf({
       formCode: 'BM111-07',
-      formTitle: 'Lệnh đình chỉ thi công',
+      formTitle: isWorker ? 'Lệnh đình chỉ công việc (cá nhân)' : 'Lệnh đình chỉ thi công',
       meta: [
-        { label: 'Hợp đồng', value: s.contract_no },
+        ...(isWorker
+          ? [
+              { label: 'Người lao động', value: s.worker_name ?? '' },
+              { label: 'Số CCCD', value: s.worker_id_number ?? '' },
+            ]
+          : []),
+        { label: 'Hợp đồng', value: s.contract_no ?? '—' },
         { label: 'Nhà thầu', value: s.contractor_name ?? '' },
         { label: 'Ngày phát lệnh', value: date },
         { label: 'Người phát lệnh', value: s.issued_by_name ?? '' },
@@ -87,13 +122,23 @@ export default function SuspensionsPage() {
         { code: '2', name: 'Phạm vi đình chỉ', note: s.scope ?? '' },
         ...(s.status === 'lifted' ? [{ code: '3', name: 'Ghi chú gỡ lệnh', note: s.lift_note ?? '' }] : []),
       ]}],
-      verifyCode: `ATLD|SUSP|${s.id}|${s.contract_no}|${date}`,
+      verifyCode: `ATLD|SUSP|${s.id}|${ref}|${date}`,
       signatureLabels: ['Người phát lệnh', 'Người phê duyệt'],
-      fileName: `LenhDinhChi_${s.contract_no}_${s.id}.pdf`,
+      fileName: `LenhDinhChi_${ref}_${s.id}.pdf`,
     })
   }
 
+  // Lọc tại client: danh sách NLĐ đã tải sẵn, và giới hạn 50 để select không quá dài.
+  const wq = workerQ.trim().toLowerCase()
+  const matchedWorkers = workers
+    .filter((w) => !wq
+      || w.full_name.toLowerCase().includes(wq)
+      || (w.id_number ?? '').toLowerCase().includes(wq))
+    .slice(0, 50)
+
   const issued = suspensions.filter((s) => s.status === 'issued')
+  const issuedWorker = issued.filter((s) => s.target_scope === 'worker')
+  const issuedContract = issued.filter((s) => s.target_scope !== 'worker')
   const lifted = suspensions.filter((s) => s.status === 'lifted')
   const visible = filterStatus === 'all' ? suspensions : suspensions.filter((s) => s.status === filterStatus)
 
@@ -122,7 +167,10 @@ export default function SuspensionsPage() {
           <span className="text-2xl">🚫</span>
           <div>
             <p className="font-semibold text-rose-700">
-              {issued.length} hợp đồng đang bị đình chỉ — NLĐ liên quan bị chặn cổng tức thì.
+              {issuedContract.length > 0 && `${issuedContract.length} hợp đồng`}
+              {issuedContract.length > 0 && issuedWorker.length > 0 && ' và '}
+              {issuedWorker.length > 0 && `${issuedWorker.length} người lao động`}
+              {' '}đang bị đình chỉ — bị chặn cổng tức thì.
             </p>
             <p className="text-sm text-rose-500">Xử lý vi phạm trước khi gỡ đình chỉ.</p>
           </div>
@@ -132,7 +180,7 @@ export default function SuspensionsPage() {
       {/* Danh sách */}
       {visible.length === 0 && (
         <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 py-12 text-center text-sm text-slate-400">
-          {filterStatus === 'issued' ? 'Không có hợp đồng nào đang bị đình chỉ.' : 'Không có dữ liệu.'}
+          {filterStatus === 'issued' ? 'Không có hợp đồng hay người lao động nào đang bị đình chỉ.' : 'Không có dữ liệu.'}
         </div>
       )}
 
@@ -146,8 +194,29 @@ export default function SuspensionsPage() {
                   <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${s.status === 'issued' ? 'bg-rose-100 text-rose-700' : 'bg-green-100 text-green-700'}`}>
                     {s.status === 'issued' ? '🚫 Đang đình chỉ' : '✓ Đã gỡ'}
                   </span>
-                  <span className="font-semibold text-slate-800">{s.contract_no}</span>
-                  <span className="text-sm text-slate-500">— {s.contractor_name}</span>
+                  {/* Lệnh cá nhân nêu tên NLĐ trước; hợp đồng chỉ là bối cảnh nếu có. */}
+                  {s.target_scope === 'worker' ? (
+                    <>
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">
+                        Cá nhân
+                      </span>
+                      <span className="font-semibold text-slate-800">{s.worker_name ?? '—'}</span>
+                      {s.worker_id_number && (
+                        <span className="text-sm text-slate-500">— CCCD {s.worker_id_number}</span>
+                      )}
+                      {s.contract_no && (
+                        <span className="text-sm text-slate-400">({s.contract_no})</span>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
+                        Cả nhà thầu
+                      </span>
+                      <span className="font-semibold text-slate-800">{s.contract_no}</span>
+                      <span className="text-sm text-slate-500">— {s.contractor_name}</span>
+                    </>
+                  )}
                 </div>
                 <p className="mt-1 text-sm text-slate-600">
                   <span className="font-medium">Lý do:</span> {s.reason}
@@ -199,12 +268,52 @@ export default function SuspensionsPage() {
               <h3 className="text-lg font-semibold text-slate-800">Phát lệnh đình chỉ thi công</h3>
             </div>
             <div className="mb-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">
-              Tất cả NLĐ thuộc hợp đồng sẽ bị chặn cổng <strong>ngay lập tức</strong> khi tạo lệnh này.
+              {form.target_scope === 'worker' ? (
+                <>Chỉ <strong>người lao động được chọn</strong> bị chặn cổng ngay lập tức. Đồng nghiệp cùng hợp đồng không bị ảnh hưởng.</>
+              ) : (
+                <>Tất cả NLĐ thuộc hợp đồng sẽ bị chặn cổng <strong>ngay lập tức</strong> khi tạo lệnh này.</>
+              )}
             </div>
             {err && <p className="mb-2 rounded bg-rose-50 px-3 py-2 text-sm text-rose-600">{err}</p>}
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Hợp đồng đang hoạt động *</label>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Đình chỉ ai *</label>
+                <div className="flex rounded-lg border border-slate-300">
+                  {([
+                    ['contract', 'Cả nhà thầu'],
+                    ['worker', 'Một cá nhân'],
+                  ] as const).map(([v, label]) => (
+                    <button key={v} type="button"
+                      onClick={() => { setForm({ ...form, target_scope: v }); setErr('') }}
+                      className={`flex-1 px-3 py-2 text-sm font-medium transition first:rounded-l-lg last:rounded-r-lg
+                        ${form.target_scope === v ? 'bg-rose-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {form.target_scope === 'worker' && (
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700">Người lao động *</label>
+                  <input value={workerQ} onChange={(e) => setWorkerQ(e.target.value)}
+                    placeholder="Tìm theo tên hoặc số CCCD…"
+                    className="mb-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                  <select value={form.worker_id} onChange={(e) => setForm({ ...form, worker_id: e.target.value })}
+                    size={5} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                    {matchedWorkers.length === 0 && <option value="" disabled>Không tìm thấy người lao động</option>}
+                    {matchedWorkers.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.full_name}{w.id_number ? ` — ${w.id_number}` : ''}
+                        {w.contractor_name ? ` (${w.contractor_name})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">
+                  Hợp đồng đang hoạt động {form.target_scope === 'worker' ? '(tuỳ chọn, để ghi bối cảnh)' : '*'}
+                </label>
                 <select value={form.contract_id} onChange={(e) => setForm({ ...form, contract_id: e.target.value })}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
                   <option value="">-- Chọn hợp đồng</option>
@@ -217,7 +326,11 @@ export default function SuspensionsPage() {
                 <label className="mb-1 block text-sm font-medium text-slate-700">Phạm vi đình chỉ *</label>
                 <select value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value })}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
-                  <option value="toan_bo">Toàn bộ hợp đồng (chặn tất cả NLĐ)</option>
+                  <option value="toan_bo">
+                    {form.target_scope === 'worker'
+                      ? 'Cá nhân người lao động (chặn riêng người này)'
+                      : 'Toàn bộ hợp đồng (chặn tất cả NLĐ)'}
+                  </option>
                   <option value="Một phần công việc / hạng mục">Một phần công việc / hạng mục</option>
                   <option value="Một khu vực thi công">Một khu vực thi công</option>
                 </select>
@@ -246,10 +359,18 @@ export default function SuspensionsPage() {
           <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
             <h3 className="mb-1 text-lg font-semibold text-slate-800">Gỡ lệnh đình chỉ</h3>
             <p className="mb-4 text-sm text-slate-500">
-              Hợp đồng <strong>{liftTarget.contract_no}</strong> — {liftTarget.contractor_name}
+              {liftTarget.target_scope === 'worker' ? (
+                <>
+                  Người lao động <strong>{liftTarget.worker_name ?? '—'}</strong>
+                  {liftTarget.worker_id_number && <> — CCCD {liftTarget.worker_id_number}</>}
+                </>
+              ) : (
+                <>Hợp đồng <strong>{liftTarget.contract_no}</strong> — {liftTarget.contractor_name}</>
+              )}
             </p>
             <div className="mb-3 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
-              NLĐ đủ hồ sơ sẽ được phép vào cổng trở lại. NLĐ thiếu hồ sơ vẫn bị chặn.
+              NLĐ đủ hồ sơ sẽ được phép vào cổng trở lại. NLĐ thiếu hồ sơ vẫn bị chặn,
+              và nếu còn vướng lệnh đình chỉ khác thì vẫn giữ trạng thái đình chỉ.
             </div>
             {err && <p className="mb-2 rounded bg-rose-50 px-3 py-2 text-sm text-rose-600">{err}</p>}
             <div>

@@ -724,6 +724,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
     // Đình chỉ tra theo worker qua hợp đồng ở mọi lần syncWorkerAccess → cần index.
     await query(`CREATE INDEX IF NOT EXISTS idx_hse_suspensions_status
       ON atld.hse_suspensions(contract_id, status)`)
+
+    // ── Pha B: đình chỉ ở mức cá nhân ─────────────────────
+    // Quy trình đòi đình chỉ riêng một NLĐ ("nếu lỗi do cá nhân"), nhưng bảng cũ chỉ
+    // neo trên hợp đồng nên buộc phải chặn cả nhà thầu. Thêm worker_id và nới
+    // contract_id để biểu diễn được cả hai phạm vi.
+    await query(`ALTER TABLE atld.hse_suspensions ADD COLUMN IF NOT EXISTS worker_id INTEGER REFERENCES atld.hse_workers(id) ON DELETE CASCADE`)
+    await query(`ALTER TABLE atld.hse_suspensions ADD COLUMN IF NOT EXISTS target_scope VARCHAR(20) NOT NULL DEFAULT 'contract'`)
+    await query(`ALTER TABLE atld.hse_suspensions ALTER COLUMN contract_id DROP NOT NULL`)
+    // Dữ liệu cũ đều là đình chỉ cả hợp đồng → target_scope giữ mặc định 'contract'.
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_suspensions ADD CONSTRAINT hse_suspensions_target_chk
+          CHECK (
+            (target_scope = 'contract' AND contract_id IS NOT NULL)
+            OR (target_scope = 'worker' AND worker_id IS NOT NULL)
+          );
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_suspensions_worker
+      ON atld.hse_suspensions(worker_id, status) WHERE worker_id IS NOT NULL`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }
@@ -1929,68 +1948,126 @@ hseRouter.get('/suspensions', requireAuth, async (req, res) => {
   const contractId = req.query.contractId ? Number(req.query.contractId) : null
   const status = req.query.status ? String(req.query.status) : null
   const { all, siteId } = siteScope(req.user!)
+  const workerId = req.query.workerId ? Number(req.query.workerId) : null
+  // LEFT JOIN hợp đồng: lệnh đình chỉ cá nhân có contract_id = NULL, INNER JOIN sẽ
+  // làm chúng mất khỏi danh sách. Site suy từ hợp đồng, hoặc từ hồ sơ NLĐ khi là
+  // lệnh cá nhân (NLĐ nội bộ không gán vào hợp đồng nhà thầu nào).
   const r = await query(
     `SELECT s.*, s.created_at AS issued_at,
             c.contract_no, c.title AS contract_title,
-            ct.name AS contractor_name,
+            COALESCE(ct.name, wct.name) AS contractor_name,
+            w.full_name AS worker_name, w.id_number AS worker_id_number,
             iu.full_name AS issued_by_name,
             lu.full_name AS lifted_by_name
      FROM atld.hse_suspensions s
-     JOIN atld.hse_contracts c ON c.id = s.contract_id
+     LEFT JOIN atld.hse_contracts c ON c.id = s.contract_id
      LEFT JOIN atld.hse_contractors ct ON ct.id = c.contractor_id
+     LEFT JOIN atld.hse_workers w ON w.id = s.worker_id
+     LEFT JOIN atld.hse_contractors wct ON wct.id = w.contractor_id
      LEFT JOIN atld.users iu ON iu.id = s.issued_by
      LEFT JOIN atld.users lu ON lu.id = s.lifted_by
      WHERE ($1::int IS NULL OR s.contract_id = $1)
        AND ($2::text IS NULL OR s.status = $2)
-       AND ($3::boolean OR c.site_id = $4)
+       AND ($5::int IS NULL OR s.worker_id = $5)
+       AND ($3::boolean OR c.site_id = $4 OR w.site_id = $4 OR EXISTS (
+         SELECT 1 FROM atld.hse_contract_workers cw
+         JOIN atld.hse_contracts wc ON wc.id = cw.contract_id
+         WHERE cw.worker_id = s.worker_id AND wc.site_id = $4))
      ORDER BY s.created_at DESC`,
-    [contractId, status, all, siteId],
+    [contractId, status, all, siteId, workerId],
   )
   res.json({ suspensions: r.rows })
 })
 
 hseRouter.post('/suspensions', ...canApprove, async (req, res) => {
   const b = req.body ?? {}
-  const contractId = Number(b.contract_id)
+  // target_scope='worker' → đình chỉ riêng một NLĐ; 'contract' → cả nhà thầu như trước.
+  // Mặc định 'contract' để client cũ (chỉ gửi contract_id) không đổi hành vi.
+  const targetScope = b.target_scope === 'worker' ? 'worker' : 'contract'
+  const contractId = b.contract_id ? Number(b.contract_id) : null
+  const workerId = b.worker_id ? Number(b.worker_id) : null
   const reason = escapeText(String(b.reason ?? '').trim())
   const scope = escapeText(String(b.scope ?? '').trim())
-  if (!contractId || !reason || !scope)
-    return res.status(400).json({ error: 'Thiếu hợp đồng, lý do hoặc phạm vi đình chỉ.' })
+  if (!reason || !scope)
+    return res.status(400).json({ error: 'Thiếu lý do hoặc phạm vi đình chỉ.' })
+  if (targetScope === 'contract' && !contractId)
+    return res.status(400).json({ error: 'Đình chỉ cả nhà thầu cần chọn hợp đồng.' })
+  if (targetScope === 'worker' && !workerId)
+    return res.status(400).json({ error: 'Đình chỉ cá nhân cần chọn người lao động.' })
+
+  // Không để officer đình chỉ đối tượng ngoài site mình phụ trách.
+  const { all, siteId } = siteScope(req.user!)
+  if (targetScope === 'contract') {
+    if (!(await contractInScope(contractId!, req.user!)))
+      return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+  } else {
+    const w = await query<{ id: number }>(
+      `SELECT w.id FROM atld.hse_workers w
+       WHERE w.id = $1 AND ($2::boolean OR w.site_id = $3 OR EXISTS (
+         SELECT 1 FROM atld.hse_contract_workers cw
+         JOIN atld.hse_contracts c ON c.id = cw.contract_id
+         WHERE cw.worker_id = w.id AND c.site_id = $3))`,
+      [workerId, all, siteId])
+    if (!w.rows[0]) return res.status(404).json({ error: 'Không tìm thấy người lao động.' })
+  }
+
   const r = await query<{ id: number }>(
-    `INSERT INTO atld.hse_suspensions (contract_id, inspection_id, issued_by, reason, scope)
-     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [contractId, b.inspection_id ? Number(b.inspection_id) : null, req.user!.id, reason, scope],
+    `INSERT INTO atld.hse_suspensions (contract_id, worker_id, target_scope, inspection_id, issued_by, reason, scope)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [targetScope === 'contract' ? contractId : (contractId ?? null),
+     targetScope === 'worker' ? workerId : null, targetScope,
+     b.inspection_id ? Number(b.inspection_id) : null, req.user!.id, reason, scope],
   )
-  // Chặn tức thì mọi NLĐ thuộc hợp đồng
-  await query(
-    `UPDATE atld.hse_workers SET access_status = 'suspended', updated_at = now()
-     WHERE id IN (SELECT worker_id FROM atld.hse_contract_workers WHERE contract_id = $1)`,
-    [contractId],
-  )
-  await audit(req.user!, 'SUSPENSION_ISSUE', 'suspension', r.rows[0]!.id, null, { contractId, reason }, clientIp(req))
-  res.status(201).json({ id: r.rows[0]!.id })
+  // Chặn tức thì. syncWorkerAccess đọc lại lệnh vừa ghi nên tự ra 'suspended',
+  // đồng thời ghi luôn access_block_reason cho cổng hiển thị.
+  const targets = targetScope === 'worker'
+    ? [workerId!]
+    : (await query<{ worker_id: number }>(
+        `SELECT worker_id FROM atld.hse_contract_workers WHERE contract_id = $1`,
+        [contractId])).rows.map((x) => x.worker_id)
+  for (const id of targets) await syncWorkerAccess(id)
+
+  await audit(req.user!, 'SUSPENSION_ISSUE', 'suspension', r.rows[0]!.id, null,
+    { targetScope, contractId, workerId, reason, affected: targets.length }, clientIp(req))
+  res.status(201).json({ id: r.rows[0]!.id, affected: targets.length })
 })
 
 // Gỡ đình chỉ → khôi phục access theo hồ sơ
 hseRouter.patch('/suspensions/:id/lift', ...canApprove, async (req, res) => {
   const id = Number(req.params.id)
-  const cur = await query<{ contract_id: number; status: string }>(
-    `SELECT contract_id, status FROM atld.hse_suspensions WHERE id = $1`, [id])
+  const { all, siteId } = siteScope(req.user!)
+  // Lọc site ngay trong SELECT: officer không gỡ được lệnh ngoài site mình.
+  // Lệnh đình chỉ cá nhân suy site qua hồ sơ NLĐ (site_id hoặc hợp đồng của NLĐ đó).
+  const cur = await query<{ contract_id: number | null; worker_id: number | null; target_scope: string; status: string }>(
+    `SELECT s.contract_id, s.worker_id, s.target_scope, s.status
+     FROM atld.hse_suspensions s
+     LEFT JOIN atld.hse_contracts c ON c.id = s.contract_id
+     LEFT JOIN atld.hse_workers w ON w.id = s.worker_id
+     WHERE s.id = $1
+       AND ($2::boolean OR c.site_id = $3 OR w.site_id = $3 OR EXISTS (
+         SELECT 1 FROM atld.hse_contract_workers cw
+         JOIN atld.hse_contracts wc ON wc.id = cw.contract_id
+         WHERE cw.worker_id = s.worker_id AND wc.site_id = $3))`,
+    [id, all, siteId])
   if (!cur.rows[0]) return res.status(404).json({ error: 'Không tìm thấy lệnh đình chỉ.' })
+  if (cur.rows[0].status === 'lifted')
+    return res.status(400).json({ error: 'Lệnh đình chỉ này đã được gỡ.' })
   await query(
     `UPDATE atld.hse_suspensions SET status = 'lifted', lifted_by = $1, lifted_at = now(), lift_note = $2, updated_at = now()
      WHERE id = $3`,
     [req.user!.id, escapeText(String(req.body.lift_note ?? '')), id],
   )
-  // Đưa worker về 'blocked' trước, rồi sync lại theo hồ sơ
-  const workers = await query<{ worker_id: number }>(
-    `SELECT worker_id FROM atld.hse_contract_workers WHERE contract_id = $1`, [cur.rows[0].contract_id])
-  for (const w of workers.rows) {
-    await query(`UPDATE atld.hse_workers SET access_status = 'blocked' WHERE id = $1`, [w.worker_id])
-    await syncWorkerAccess(w.worker_id)
-  }
+  // Xét lại theo hồ sơ. Không cần hạ 'blocked' trước như trước đây: syncWorkerAccess
+  // tự tính ra trạng thái đúng, và nó còn giữ 'suspended' nếu NLĐ vẫn vướng lệnh khác
+  // (ví dụ gỡ lệnh hợp đồng nhưng cá nhân vẫn đang bị đình chỉ riêng).
+  const workers = cur.rows[0].target_scope === 'worker' && cur.rows[0].worker_id
+    ? [cur.rows[0].worker_id]
+    : (await query<{ worker_id: number }>(
+        `SELECT worker_id FROM atld.hse_contract_workers WHERE contract_id = $1`,
+        [cur.rows[0].contract_id])).rows.map((x) => x.worker_id)
+  for (const wid of workers) await syncWorkerAccess(wid)
   await audit(req.user!, 'SUSPENSION_LIFT', 'suspension', id, { status: cur.rows[0].status }, { status: 'lifted' }, clientIp(req))
-  res.json({ ok: true })
+  res.json({ ok: true, restored: workers.length })
 })
 
 // ═══════════════ AUDIT LOG (chỉ đọc) ═══════════════
