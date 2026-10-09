@@ -17,9 +17,14 @@ interface GateWorker {
   id_number: string | null
   access_status: string
   contractor_name: string
+  /**
+   * Pha E: đây là quyết định CUỐI của cổng, không chỉ là "đủ hồ sơ". False cả khi
+   * chưa được phê duyệt cấp quyền, hết hiệu lực, bị đình chỉ hoặc đã thu hồi quyền.
+   */
   eligible: boolean
   reasons: string[]
   suspended: boolean
+  revoked: boolean
   presence: string          // 'in' = đang trong công trường, 'out' = đã ra/chưa vào
   last_in_at: string | null
   last_out_at: string | null
@@ -343,7 +348,10 @@ export default function GatePage({ embedded = false }: Props) {
     }
   }, [faceMode, facingMode, search, lookupVisitor])
 
-  const allowed = !!selected && selected.eligible && selected.access_status !== 'suspended'
+  // eligible đã gồm cả đình chỉ/thu hồi/phê duyệt/hiệu lực (xem evalWorkerAccess ở
+  // server). Không && thêm access_status nữa — lặp điều kiện ở hai nơi là cách Pha A
+  // đã sinh ra lỗi lần trước.
+  const allowed = !!selected && selected.eligible
 
   const wrap = (children: React.ReactNode) =>
     embedded
@@ -450,7 +458,7 @@ export default function GatePage({ embedded = false }: Props) {
       {results.length > 0 && !selected && (
         <ul className="rounded-xl border border-slate-200 bg-white shadow-sm divide-y divide-slate-100">
           {results.map((w) => {
-            const ok = w.eligible && w.access_status !== 'suspended'
+            const ok = w.eligible
             return (
               <li key={w.id}>
                 <button
@@ -489,6 +497,9 @@ export default function GatePage({ embedded = false }: Props) {
             {selected.access_status === 'suspended' && (
               <p className="mt-1 text-sm font-semibold text-orange-600">⚠ Đang bị đình chỉ</p>
             )}
+            {selected.access_status === 'revoked' && (
+              <p className="mt-1 text-sm font-semibold text-slate-700">⛔ Đã thu hồi quyền vào nhà máy</p>
+            )}
           </div>
 
           <div className="mb-4 rounded-xl bg-white/70 px-4 py-3">
@@ -509,7 +520,9 @@ export default function GatePage({ embedded = false }: Props) {
 
           {!allowed && Array.isArray(selected.reasons) && selected.reasons.length > 0 && (
             <div className="mb-4 rounded-xl bg-rose-100 px-4 py-3">
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">Hồ sơ còn thiếu:</p>
+              {/* Không còn chỉ là "hồ sơ còn thiếu": reasons giờ gồm cả chưa phê duyệt,
+                  hết hiệu lực, đình chỉ và thu hồi quyền. */}
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">Lý do không được vào:</p>
               <ul className="space-y-1">
                 {selected.reasons.map((m, i) => (
                   <li key={i} className="flex items-start gap-1.5 text-sm text-rose-700">

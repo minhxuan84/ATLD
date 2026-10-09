@@ -163,14 +163,16 @@ adminRouter.post('/courses', requireSection('khoa-hoc'), async (req, res) => {
   const passScore = Math.max(0, Math.min(100, Number(b.pass_score) || 80))
   await query(
     `INSERT INTO courses (id, title, description, grp, branch_id, video_url, duration, summary, pass_score, sort_order,
-                          questions_per_attempt, validity_months, randomize_options)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+                          questions_per_attempt, validity_months, randomize_options, max_attempts)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
     [id, String(b.title ?? '').slice(0, 200), String(b.description ?? ''), String(b.grp ?? ''), branchId,
      String(b.video_url ?? ''), String(b.duration ?? ''), JSON.stringify(Array.isArray(b.summary) ? b.summary : []),
      passScore, Number(b.sort_order) || 0,
      Number(b.questions_per_attempt) || 0,
      b.validity_months ? Number(b.validity_months) : null,
-     Boolean(b.randomize_options)],
+     Boolean(b.randomize_options),
+     // 0 = không giới hạn. Chặn trên 20 để tránh nhập nhầm thành số vô nghĩa.
+     Math.max(0, Math.min(20, Number(b.max_attempts) || 0))],
   )
   res.status(201).json({ id })
 })
@@ -183,18 +185,24 @@ adminRouter.put('/courses/:id', requireSection('khoa-hoc'), async (req, res) => 
   // lần sửa khóa học sẽ xóa luôn cấu hình rút đề. COALESCE giữ giá trị cũ khi thiếu khóa.
   const qpa = b.questions_per_attempt === undefined ? null : Number(b.questions_per_attempt) || 0
   const randomize = b.randomize_options === undefined ? null : Boolean(b.randomize_options)
+  // max_attempts cũng theo COALESCE: form không gửi khóa này thì giữ giới hạn cũ,
+  // không âm thầm mở lại thành không giới hạn.
+  const maxAttempts = b.max_attempts === undefined
+    ? null : Math.max(0, Math.min(20, Number(b.max_attempts) || 0))
   await query(
     `UPDATE courses SET title=$1, description=$2, grp=$3, branch_id=$4, video_url=$5, duration=$6, summary=$7, pass_score=$8,
                         questions_per_attempt=COALESCE($9, questions_per_attempt),
                         validity_months=$10,
-                        randomize_options=COALESCE($11, randomize_options)
-     WHERE id=$12`,
+                        randomize_options=COALESCE($11, randomize_options),
+                        max_attempts=COALESCE($12, max_attempts)
+     WHERE id=$13`,
     [String(b.title ?? '').slice(0, 200), String(b.description ?? ''), String(b.grp ?? ''), branchId,
      String(b.video_url ?? ''), String(b.duration ?? ''), JSON.stringify(Array.isArray(b.summary) ? b.summary : []),
      passScore,
      qpa,
      b.validity_months ? Number(b.validity_months) : null,
      randomize,
+     maxAttempts,
      req.params.id],
   )
   res.json({ ok: true })

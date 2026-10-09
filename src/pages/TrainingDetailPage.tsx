@@ -46,6 +46,9 @@ export default function TrainingDetailPage() {
   const [step, setStep] = useState(1)
   const [answers, setAnswers] = useState<Record<number, number>>({})
   const [result, setResult] = useState<{ score: number; passed: boolean; passScore: number; certificate: CertData | null } | null>(null)
+  // Pha E4: 0 = không giới hạn. attemptsLeft null khi khóa học không giới hạn.
+  const [maxAttempts, setMaxAttempts] = useState(0)
+  const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [quizFields, setQuizFields] = useState<QuizField[]>([])
@@ -53,11 +56,16 @@ export default function TrainingDetailPage() {
   const [infoConfirmed, setInfoConfirmed] = useState(false)
 
   useEffect(() => {
-    api<{ course: Course; questions: Question[]; progress: ProgressRow | null }>(`/courses/${id}`)
+    api<{
+      course: Course; questions: Question[]; progress: ProgressRow | null
+      max_attempts: number; attempts_left: number | null
+    }>(`/courses/${id}`)
       .then((d) => {
         setCourse(d.course)
         setQuestions(d.questions)
         setStep(d.progress?.step ?? 1)
+        setMaxAttempts(d.max_attempts ?? 0)
+        setAttemptsLeft(d.attempts_left ?? null)
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
@@ -74,10 +82,14 @@ export default function TrainingDetailPage() {
   const submitQuiz = async () => {
     setError('')
     try {
-      const r = await api<typeof result>(`/courses/${id}/submit`, { method: 'POST', body: { answers, traineeInfo } })
+      const r = await api<NonNullable<typeof result> & { attempts_left: number | null }>(
+        `/courses/${id}/submit`, { method: 'POST', body: { answers, traineeInfo } })
       setResult(r)
+      setAttemptsLeft(r.attempts_left ?? null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Nộp bài thất bại.')
+      // Hết lượt thì server trả 403; cập nhật để ẩn nút "Làm lại" thay vì để bấm vô ích.
+      if (maxAttempts > 0) setAttemptsLeft(0)
     }
   }
 
@@ -95,6 +107,8 @@ export default function TrainingDetailPage() {
 
   const allAnswered = questions.every((q) => answers[q.id] !== undefined)
   const showCert = result?.passed && result.certificate
+  // Hết lượt thì không cho nộp nữa; server cũng chặn, đây chỉ là để không mời bấm.
+  const outOfAttempts = maxAttempts > 0 && attemptsLeft != null && attemptsLeft <= 0
 
   return (
     <div>
@@ -275,9 +289,23 @@ export default function TrainingDetailPage() {
                   ))}
                 </div>
 
+                {/* Nói trước còn mấy lượt, không để học viên làm hết bài rồi mới nhận 403. */}
+                {maxAttempts > 0 && !result && (
+                  <p className={`mt-4 rounded-lg px-3 py-2 text-sm ${(attemptsLeft ?? 0) > 0 ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700'}`}>
+                    {(attemptsLeft ?? 0) > 0
+                      ? `Khóa học này giới hạn ${maxAttempts} lần làm bài — bạn còn ${attemptsLeft} lượt.`
+                      : `Bạn đã dùng hết ${maxAttempts} lần làm bài. Liên hệ cán bộ ATVSLĐ để được xem xét.`}
+                  </p>
+                )}
+
                 {result && !result.passed && (
                   <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-                    Kết quả: <b>{result.score}%</b> — Chưa đạt (yêu cầu ≥ {result.passScore}%). Vui lòng ôn lại và làm lại.
+                    Kết quả: <b>{result.score}%</b> — Chưa đạt (yêu cầu ≥ {result.passScore}%).
+                    {maxAttempts > 0 && attemptsLeft === 0
+                      ? ' Đã hết số lần làm bài cho phép; hồ sơ cấp quyền vào nhà máy sẽ do cán bộ ATVSLĐ xem xét lại.'
+                      : maxAttempts > 0
+                        ? ` Vui lòng ôn lại và làm lại — còn ${attemptsLeft} lượt.`
+                        : ' Vui lòng ôn lại và làm lại.'}
                   </div>
                 )}
                 {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
@@ -289,12 +317,12 @@ export default function TrainingDetailPage() {
                   {!result ? (
                     <button
                       onClick={submitQuiz}
-                      disabled={!allAnswered}
-                      className={`rounded-lg px-5 py-2.5 font-semibold text-white ${allAnswered ? 'bg-hatien-500 hover:bg-hatien-600' : 'cursor-not-allowed bg-slate-300'}`}
+                      disabled={!allAnswered || outOfAttempts}
+                      className={`rounded-lg px-5 py-2.5 font-semibold text-white ${allAnswered && !outOfAttempts ? 'bg-hatien-500 hover:bg-hatien-600' : 'cursor-not-allowed bg-slate-300'}`}
                     >
                       Nộp bài &amp; chấm điểm
                     </button>
-                  ) : (
+                  ) : outOfAttempts ? null : (
                     <button onClick={retry} className="inline-flex items-center gap-2 rounded-lg bg-vicem-600 px-5 py-2.5 font-semibold text-white hover:bg-vicem-700">
                       <RefreshCw className="h-4 w-4" /> Làm lại
                     </button>

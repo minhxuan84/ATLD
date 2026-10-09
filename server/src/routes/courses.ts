@@ -1,6 +1,8 @@
 import { Router } from 'express'
 import { query } from '../db.js'
 import { requireAuth } from '../auth.js'
+import { findWorkersByTraineeIdentity } from '../lib/hse-training.js'
+import { audit, clientIp, syncWorkerAccess } from '../lib/hse-core.js'
 
 export const coursesRouter = Router()
 
@@ -9,6 +11,7 @@ coursesRouter.get('/', requireAuth, async (req, res) => {
   const courses = await query(
     `SELECT c.id, c.title, c.description, c.grp, c.branch_id, b.name AS branch_name,
             c.video_url, c.duration, c.summary, c.pass_score, c.validity_months,
+            c.max_attempts,
             (SELECT count(*)::int FROM questions q WHERE q.course_id = c.id) AS question_count
      FROM courses c
      LEFT JOIN branches b ON b.id = c.branch_id
@@ -36,12 +39,21 @@ coursesRouter.get('/meta/quiz-fields', requireAuth, async (_req, res) => {
 coursesRouter.get('/:id', requireAuth, async (req, res) => {
   const { rows } = await query(
     `SELECT id, title, description, grp, video_url, duration, summary, pass_score,
-            questions_per_attempt, validity_months, randomize_options
+            questions_per_attempt, validity_months, randomize_options, max_attempts
      FROM courses WHERE id = $1`,
     [req.params.id],
   )
   const course = rows[0]
   if (!course) return res.status(404).json({ error: 'Không tìm thấy khóa học.' })
+
+  // Số lần đã dùng để UI báo trước còn mấy lần, thay vì để học viên làm xong mới bị 403.
+  const usedRes = await query<{ n: string }>(
+    `SELECT count(*)::int AS n FROM atld.quiz_attempts
+     WHERE user_id = $1 AND course_id = $2 AND submitted_at IS NOT NULL`,
+    [req.user!.id, req.params.id],
+  )
+  const attemptsUsed = Number(usedRes.rows[0]?.n ?? 0)
+  const maxAttempts = Number(course.max_attempts ?? 0)
 
   // Lấy tất cả câu hỏi (để biết tổng số)
   const allQuestions = await query<{ id: number; text: string; options: string[] }>(
@@ -78,6 +90,9 @@ coursesRouter.get('/:id', requireAuth, async (req, res) => {
     questions: selectedQuestions,
     questionIds: selectedQuestions.map((q) => q.id), // Để client gửi lại khi submit
     progress: progress.rows[0] ?? null,
+    attempts_used: attemptsUsed,
+    max_attempts: maxAttempts,
+    attempts_left: maxAttempts > 0 ? Math.max(0, maxAttempts - attemptsUsed) : null,
   })
 })
 
@@ -118,12 +133,34 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     }
     if (value) traineeInfo[f.field_key] = value
   }
-  const courseRes = await query<{ pass_score: number; title: string; validity_months: number | null }>(
-    'SELECT pass_score, title, validity_months FROM courses WHERE id = $1',
+  const courseRes = await query<{
+    pass_score: number; title: string; validity_months: number | null; max_attempts: number
+  }>(
+    'SELECT pass_score, title, validity_months, max_attempts FROM courses WHERE id = $1',
     [courseId],
   )
   const course = courseRes.rows[0]
   if (!course) return res.status(404).json({ error: 'Không tìm thấy khóa học.' })
+
+  // ── Pha E4: giới hạn số lần thi (bước 3) ──────────────────────────────────
+  // Đếm theo user_id vì quiz_attempts chỉ có cột đó. Hệ quả cần biết: nếu nhà thầu
+  // cho nhiều người thi bằng một tài khoản thì số lần dùng chung. Muốn tách theo
+  // từng người phải cấp tài khoản riêng.
+  const maxAttempts = Number(course.max_attempts ?? 0)
+  const usedRes = await query<{ n: string }>(
+    `SELECT count(*)::int AS n FROM atld.quiz_attempts
+     WHERE user_id = $1 AND course_id = $2 AND submitted_at IS NOT NULL`,
+    [req.user!.id, courseId],
+  )
+  const used = Number(usedRes.rows[0]?.n ?? 0)
+  // Chặn TRƯỚC khi chấm: chấm rồi mới chặn thì vẫn lộ kết quả và vẫn ghi attempt.
+  if (maxAttempts > 0 && used >= maxAttempts) {
+    return res.status(403).json({
+      error: `Đã hết số lần làm bài cho phép (${maxAttempts} lần). `
+        + 'Liên hệ cán bộ ATVSLĐ để được xem xét.',
+      attempts_used: used, max_attempts: maxAttempts,
+    })
+  }
 
   // Nếu có questionIds (đề ngẫu nhiên) thì chỉ chấm bộ đó, ngược lại chấm toàn bộ
   const qres = await query<{ id: number; correct_index: number }>(
@@ -179,6 +216,36 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     )
   }
 
+  // ── Pha E4 (bước 11): hết số lần mà vẫn chưa đạt → từ chối cấp quyền vào nhà máy.
+  // Chỉ chạy đúng lần cuối cùng và chỉ khi trượt; đạt ở lần cuối thì không có gì để
+  // từ chối. Bọc try/catch riêng: hồ sơ NLĐ là phần phụ của việc nộp bài, lỗi ở đây
+  // không được làm học viên mất kết quả vừa chấm.
+  const attemptsLeft = maxAttempts > 0 ? Math.max(0, maxAttempts - (used + 1)) : null
+  if (!passed && maxAttempts > 0 && used + 1 >= maxAttempts) {
+    try {
+      const workerIds = await findWorkersByTraineeIdentity(
+        req.user!.id, traineeInfo.cccd ?? traineeInfo.id_number ?? null)
+      for (const wid of workerIds) {
+        // Không ghi đè quyết định đã có của cán bộ ('approved' do người ký, hoặc
+        // 'rejected' với lý do khác). Chỉ hạ hồ sơ còn đang chờ/bị trả lại.
+        const upd = await query<{ id: number }>(
+          `UPDATE atld.hse_workers
+           SET entry_approval_status = 'rejected',
+               entry_approval_note = $1, entry_approved_at = now(), updated_at = now()
+           WHERE id = $2 AND entry_approval_status IN ('pending','returned')
+             AND access_status <> 'revoked'
+           RETURNING id`,
+          [`Không đạt bài kiểm tra "${course.title}" sau ${maxAttempts} lần làm bài.`, wid])
+        if (!upd.rows[0]) continue
+        await audit(req.user!, 'WORKER_ENTRY_REJECT_QUIZ', 'worker', wid, null,
+          { courseId, attempts: used + 1, maxAttempts, score }, clientIp(req))
+        await syncWorkerAccess(wid)
+      }
+    } catch (e) {
+      console.error('[quiz max_attempts → entry_approval]', e)
+    }
+  }
+
   // Tên trên chứng chỉ ưu tiên họ tên khai báo, không có thì dùng tên tài khoản
   const traineeName = traineeInfo.full_name || req.user!.fullName
 
@@ -186,6 +253,9 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     score,
     passed,
     passScore,
+    attempts_used: used + 1,
+    max_attempts: maxAttempts,
+    attempts_left: attemptsLeft,
     certificate: passed
       ? {
           certId,

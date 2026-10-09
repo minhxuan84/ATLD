@@ -4,8 +4,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api, openFileInNewTab } from '../../lib/api'
 import { fmtDate } from '../../lib/date'
-import { useAuth, seesAllSites } from '../../context/AuthContext'
+import { useAuth, seesAllSites, canHse } from '../../context/AuthContext'
 import FaceEnrollModal from '../../components/hse/FaceEnrollModal'
+import SmartCAModal from '../../components/hse/SmartCAModal'
 
 interface Worker {
   id: number; full_name: string; id_number: string | null; job_title: string | null
@@ -18,6 +19,12 @@ interface WorkerFull extends Worker {
   emergency_contact: string | null; emergency_phone: string | null
   note: string | null; site_id: number | null; site_name: string | null
   presence: string; access_block_reason: string | null
+  // Pha E1–E3: phê duyệt cấp quyền, hiệu lực/khu vực, thu hồi.
+  entry_approval_status: string; entry_approval_note: string | null
+  entry_approved_at: string | null; entry_signature: string | null
+  access_valid_from: string | null; access_valid_to: string | null
+  allowed_areas: string[] | null
+  revoke_reason: string | null; revoke_note: string | null; revoked_at: string | null
 }
 interface DocType {
   id: number; code: string; name: string; scope: string
@@ -44,12 +51,30 @@ interface WorkerContract {
 }
 interface Detail {
   worker: WorkerFull; docs: WorkerDoc[]; contracts: WorkerContract[]
-  eligibility: { ok: boolean; missing: string[] }; training: TrainingRecord[]
+  // eligibility: chỉ nói về giấy tờ. access: quyết định cuối ở cổng (Pha E).
+  eligibility: { ok: boolean; missing: string[] }
+  access: { status: string; reasons: string[] }
+  training: TrainingRecord[]
 }
 
 const STATUS_COLOR: Record<string, string> = {
   allowed: 'bg-green-100 text-green-700', blocked: 'bg-rose-100 text-rose-700',
-  suspended: 'bg-orange-100 text-orange-700',
+  suspended: 'bg-orange-100 text-orange-700', revoked: 'bg-slate-700 text-white',
+}
+const STATUS_LABEL: Record<string, string> = {
+  allowed: 'Cho phép', blocked: 'Chặn', suspended: 'Đình chỉ', revoked: 'Đã thu hồi',
+}
+const APPROVAL_LABEL: Record<string, string> = {
+  pending: 'Chờ phê duyệt', approved: 'Đã phê duyệt',
+  returned: 'Trả lại bổ sung', rejected: 'Từ chối',
+}
+const APPROVAL_COLOR: Record<string, string> = {
+  pending: 'bg-yellow-100 text-yellow-700', approved: 'bg-green-100 text-green-700',
+  returned: 'bg-amber-100 text-amber-700', rejected: 'bg-rose-100 text-rose-700',
+}
+const REVOKE_LABEL: Record<string, string> = {
+  contract_end: 'Hết hợp đồng', left_project: 'Rời công trường',
+  serious_violation: 'Vi phạm nghiêm trọng', other: 'Lý do khác',
 }
 const DOC_STATUS_COLOR: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-700', approved: 'bg-green-100 text-green-700',
@@ -163,7 +188,7 @@ export default function WorkersPage() {
                   </span>
                 </span>
                 <span className={`ml-2 shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[w.access_status] ?? 'bg-slate-100 text-slate-600'}`}>
-                  {w.access_status === 'allowed' ? 'Cho phép' : w.access_status === 'blocked' ? 'Chặn' : 'Đình chỉ'}
+                  {STATUS_LABEL[w.access_status] ?? w.access_status}
                 </span>
               </button>
             </li>
@@ -319,7 +344,7 @@ function WorkerDetail({ detail, docTypes, contractors, branches, canPickSite, on
     </section>
   )
 
-  const { eligibility, training, contracts } = detail
+  const { eligibility, access, training, contracts } = detail
   const certDocs = detail.docs.filter((d) => d.group_name === CERT_GROUP)
   const mainDocs = detail.docs.filter((d) => d.group_name !== CERT_GROUP)
   // Cảnh báo tự động: gộp hồ sơ/chứng chỉ sắp hết hạn và chứng chỉ huấn luyện hết hạn.
@@ -351,8 +376,13 @@ function WorkerDetail({ detail, docTypes, contractors, branches, canPickSite, on
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Hai nhãn khác nhau: hồ sơ đủ chưa, và cổng có cho vào không. Trước Pha E
+                hai thứ này là một nên chỉ cần một nhãn. */}
             <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${eligibility.ok ? 'bg-green-100 text-green-700' : 'bg-rose-100 text-rose-700'}`}>
-              {eligibility.ok ? '✓ Đủ điều kiện' : '✗ Chưa đủ'}
+              {eligibility.ok ? '✓ Đủ hồ sơ' : '✗ Thiếu hồ sơ'}
+            </span>
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[access.status] ?? 'bg-slate-100 text-slate-600'}`}>
+              {access.status === 'allowed' ? '✓ Được vào nhà máy' : STATUS_LABEL[access.status] ?? access.status}
             </span>
             <button onClick={() => setEditing(true)}
               className="rounded bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200">
@@ -385,10 +415,13 @@ function WorkerDetail({ detail, docTypes, contractors, branches, canPickSite, on
           </div>
         )}
 
-        {!eligibility.ok && eligibility.missing.length > 0 && (
+        {/* Lý do bị chặn ở cổng — gồm cả thiếu hồ sơ, chưa phê duyệt, hết hiệu lực,
+            đình chỉ và thu hồi. Thay cho hộp "hồ sơ còn thiếu" cũ vì hồ sơ đủ vẫn
+            có thể bị chặn. */}
+        {access.status !== 'allowed' && access.reasons.length > 0 && (
           <div className="mb-3 rounded bg-rose-50 p-2 text-xs text-rose-600">
-            <p className="mb-1 font-semibold">Hồ sơ còn thiếu:</p>
-            <ul className="list-inside list-disc space-y-0.5">{eligibility.missing.map((m, i) => <li key={i}>{m}</li>)}</ul>
+            <p className="mb-1 font-semibold">Chưa được vào nhà máy vì:</p>
+            <ul className="list-inside list-disc space-y-0.5">{access.reasons.map((m, i) => <li key={i}>{m}</li>)}</ul>
           </div>
         )}
 
@@ -410,6 +443,8 @@ function WorkerDetail({ detail, docTypes, contractors, branches, canPickSite, on
           ))}
         </dl>
       </div>
+
+      <AccessApprovalPanel worker={worker} onRefresh={onRefresh} />
 
       <DocTable title="Hồ sơ an toàn bắt buộc" docs={mainDocs} onReview={review}
         empty="Chưa có hồ sơ." />
@@ -528,6 +563,222 @@ function WorkerDetail({ detail, docTypes, contractors, branches, canPickSite, on
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * Phê duyệt cấp quyền vào nhà máy (Pha E, bước 6–7–10).
+ *
+ * Chỉ người có quyền 'approve' thấy các nút; người chỉ có 'inspect' vẫn đọc được trạng
+ * thái để biết hồ sơ đang nằm ở đâu, nhưng không bấm được — khớp với guard canApprove
+ * ở server, không để UI mời bấm rồi nhận 403.
+ */
+function AccessApprovalPanel({ worker, onRefresh }: {
+  worker: WorkerFull; onRefresh: () => void
+}) {
+  const { user } = useAuth()
+  const canApprove = canHse(user, 'approve')
+  const [validFrom, setValidFrom] = useState(worker.access_valid_from?.slice(0, 10) ?? '')
+  const [validTo, setValidTo] = useState(worker.access_valid_to?.slice(0, 10) ?? '')
+  const [areas, setAreas] = useState((worker.allowed_areas ?? []).join(', '))
+  const [note, setNote] = useState('')
+  const [revokeReason, setRevokeReason] = useState('contract_end')
+  const [showRevoke, setShowRevoke] = useState(false)
+  const [signing, setSigning] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  // Đổi NLĐ đang xem thì nạp lại form theo hồ sơ mới, không giữ số liệu của người trước.
+  useEffect(() => {
+    setValidFrom(worker.access_valid_from?.slice(0, 10) ?? '')
+    setValidTo(worker.access_valid_to?.slice(0, 10) ?? '')
+    setAreas((worker.allowed_areas ?? []).join(', '))
+    setNote(''); setErr(''); setShowRevoke(false)
+  }, [worker.id, worker.access_valid_from, worker.access_valid_to, worker.allowed_areas])
+
+  const decide = async (status: 'approved' | 'returned' | 'rejected' | 'pending') => {
+    setErr(''); setBusy(true)
+    try {
+      await api(`/hse/workers/${worker.id}/entry-approval`, {
+        method: 'PATCH',
+        body: {
+          status, note,
+          access_valid_from: validFrom || null,
+          access_valid_to: validTo || null,
+          allowed_areas: areas.split(',').map((a) => a.trim()).filter(Boolean),
+        },
+      })
+      setNote('')
+      onRefresh()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+
+  const revoke = async () => {
+    setErr(''); setBusy(true)
+    try {
+      await api(`/hse/workers/${worker.id}/revoke`, {
+        method: 'PATCH', body: { reason: revokeReason, note },
+      })
+      setShowRevoke(false); setNote('')
+      onRefresh()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+
+  const restore = async () => {
+    setErr(''); setBusy(true)
+    try {
+      await api(`/hse/workers/${worker.id}/restore-access`, { method: 'PATCH', body: { note } })
+      setNote('')
+      onRefresh()
+    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+
+  const revoked = worker.access_status === 'revoked'
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-slate-700">Quyền vào nhà máy</h3>
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${APPROVAL_COLOR[worker.entry_approval_status] ?? 'bg-slate-100 text-slate-600'}`}>
+            {APPROVAL_LABEL[worker.entry_approval_status] ?? worker.entry_approval_status}
+          </span>
+          {worker.entry_signature && (
+            <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700"
+              title="Quyết định phê duyệt đã được ký số bằng SmartCA VNPT">
+              🔐 Đã ký số
+            </span>
+          )}
+        </div>
+      </div>
+
+      {err && <p className="mb-2 rounded bg-rose-50 px-3 py-2 text-xs text-rose-600">{err}</p>}
+
+      {worker.entry_approved_at && (
+        <p className="mb-2 text-xs text-slate-400">
+          Quyết định ngày {fmtDate(worker.entry_approved_at)}
+          {worker.entry_approval_note ? ` — ${worker.entry_approval_note}` : ''}
+        </p>
+      )}
+
+      {revoked ? (
+        <div className="rounded border border-slate-300 bg-slate-50 p-3 text-xs">
+          <p className="font-semibold text-slate-700">
+            Đã thu hồi quyền{worker.revoke_reason ? `: ${REVOKE_LABEL[worker.revoke_reason] ?? worker.revoke_reason}` : ''}
+          </p>
+          {worker.revoke_note && <p className="mt-0.5 text-slate-500">{worker.revoke_note}</p>}
+          {worker.revoked_at && <p className="mt-0.5 text-slate-400">Ngày {fmtDate(worker.revoked_at)}</p>}
+          <p className="mt-1 text-slate-500">
+            Thu hồi không tự khôi phục khi hồ sơ đủ lại. Khôi phục xong vẫn phải phê duyệt lại.
+          </p>
+          {canApprove && (
+            <button onClick={restore} disabled={busy}
+              className="mt-2 rounded bg-slate-700 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+              {busy ? 'Đang xử lý…' : 'Khôi phục quyền'}
+            </button>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div>
+              <label className="text-xs text-slate-500">Hiệu lực từ</label>
+              <input type="date" value={validFrom} onChange={(e) => setValidFrom(e.target.value)}
+                disabled={!canApprove}
+                className="w-full rounded border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-50" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">Đến ngày (trống = không hạn)</label>
+              <input type="date" value={validTo} onChange={(e) => setValidTo(e.target.value)}
+                disabled={!canApprove}
+                className="w-full rounded border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-50" />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="text-xs text-slate-500">Khu vực được phép (phân tách bằng dấu phẩy)</label>
+              <input value={areas} onChange={(e) => setAreas(e.target.value)}
+                disabled={!canApprove} placeholder="VD: Lò nung, Nghiền xi măng, Kho clinker"
+                className="w-full rounded border border-slate-300 px-3 py-1.5 text-sm disabled:bg-slate-50" />
+            </div>
+            {canApprove && (
+              <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)}
+                placeholder="Ý kiến phê duyệt / lý do trả lại, từ chối"
+                className="rounded border border-slate-300 px-3 py-1.5 text-sm sm:col-span-2" />
+            )}
+          </div>
+
+          {canApprove && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button onClick={() => decide('approved')} disabled={busy}
+                className="rounded bg-green-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+                ✓ Phê duyệt cấp quyền
+              </button>
+              <button onClick={() => decide('returned')} disabled={busy}
+                className="rounded bg-amber-500 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+                ↩ Trả lại bổ sung
+              </button>
+              <button onClick={() => decide('rejected')} disabled={busy}
+                className="rounded bg-rose-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+                ✗ Từ chối
+              </button>
+              {worker.entry_approval_status === 'approved' && !worker.entry_signature && (
+                <button onClick={() => setSigning(true)} disabled={busy}
+                  className="rounded bg-sky-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+                  🔐 Ký số SmartCA
+                </button>
+              )}
+              <button onClick={() => { setShowRevoke(true); setErr('') }} disabled={busy}
+                className="rounded border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50">
+                Thu hồi quyền
+              </button>
+            </div>
+          )}
+          {!canApprove && (
+            <p className="mt-2 text-xs text-slate-400">
+              Phê duyệt cấp quyền vào nhà máy thuộc quyền "approve" — liên hệ cấp phê duyệt.
+            </p>
+          )}
+        </>
+      )}
+
+      {showRevoke && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowRevoke(false)}>
+          <div className="w-full max-w-sm rounded-lg bg-white p-5" onClick={(e) => e.stopPropagation()}>
+            <h3 className="mb-1 font-semibold">Thu hồi quyền — {worker.full_name}</h3>
+            <p className="mb-3 text-xs text-slate-500">
+              Thu hồi khác đình chỉ: hồ sơ đủ lại cũng không tự mở, và dấu phê duyệt hiện
+              tại bị xóa. Muốn mở lại phải khôi phục rồi phê duyệt lại.
+            </p>
+            {err && <p className="mb-2 rounded bg-rose-50 px-3 py-2 text-xs text-rose-600">{err}</p>}
+            <select value={revokeReason} onChange={(e) => setRevokeReason(e.target.value)}
+              className="w-full rounded border border-slate-300 px-3 py-1.5 text-sm">
+              {Object.entries(REVOKE_LABEL).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+            <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)}
+              placeholder={revokeReason === 'other' ? 'Ghi rõ lý do *' : 'Ghi chú'}
+              className="mt-2 w-full rounded border border-slate-300 px-3 py-1.5 text-sm" />
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setShowRevoke(false)} className="rounded px-3 py-1.5 text-sm text-slate-500">Hủy</button>
+              <button onClick={revoke} disabled={busy || (revokeReason === 'other' && !note.trim())}
+                className="rounded bg-rose-600 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-50">
+                {busy ? 'Đang xử lý…' : 'Thu hồi'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {signing && (
+        <SmartCAModal
+          initPath={`/hse/workers/${worker.id}/entry-approval/smartca/init`}
+          statusPath={`/hse/workers/${worker.id}/entry-approval/smartca/status`}
+          // Người ký là tài khoản đang đăng nhập, server không nhận signer_name.
+          collectSigner={false}
+          successText="Quyết định cấp quyền vào nhà máy đã được ký số."
+          onClose={() => setSigning(false)}
+          onSigned={() => { setSigning(false); onRefresh() }}
+        />
+      )}
+    </div>
   )
 }
 

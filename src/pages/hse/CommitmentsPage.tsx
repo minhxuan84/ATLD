@@ -252,7 +252,8 @@ function CommitmentDetail({ commitment, onRefresh }: { commitment: CommitmentFul
       {/* Ký số SmartCA */}
       {signing && !signed && signingMode === 'smartca' && (
         <SmartCAModal
-          commitmentId={commitment.id}
+          initPath={`/hse/commitments/${commitment.id}/smartca/init`}
+          statusPath={`/hse/commitments/${commitment.id}/smartca/status`}
           onClose={() => { setSigning(false); setSigningMode(null) }}
           onSigned={() => { setSigning(false); setSigningMode(null); onRefresh() }}
         />

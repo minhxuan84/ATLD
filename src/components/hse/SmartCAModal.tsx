@@ -1,12 +1,26 @@
 /**
  * SmartCAModal — modal ký số SmartCA VNPT.
  * Flow: nhập tên → gọi init API → hiện QR code → polling status mỗi 3s → callback onSigned.
+ *
+ * Đường dẫn init/status truyền từ ngoài vào (Pha E1): trước đây modal ghim cứng
+ * /hse/commitments/:id/... nên không dùng lại được cho phê duyệt cấp quyền vào nhà máy.
  */
 import { useState, useEffect, useRef } from 'react'
 import { api } from '../../lib/api'
 
 interface Props {
-  commitmentId: number
+  /** Endpoint khởi tạo giao dịch ký, vd: `/hse/commitments/12/smartca/init`. */
+  initPath: string
+  /** Endpoint polling trạng thái, vd: `/hse/commitments/12/smartca/status`. */
+  statusPath: string
+  /**
+   * Có hỏi tên/chức vụ người ký hay không. Bản cam kết cần (tên in lên PDF); phê
+   * duyệt cấp quyền thì người ký chính là tài khoản đang đăng nhập nên để false —
+   * hiện form mà server bỏ qua thì người dùng tưởng nhập có tác dụng.
+   */
+  collectSigner?: boolean
+  /** Dòng chữ ở bước thành công. */
+  successText?: string
   onClose: () => void
   onSigned: () => void
 }
@@ -20,7 +34,11 @@ interface TxData {
   expiresAt: string
 }
 
-export default function SmartCAModal({ commitmentId, onClose, onSigned }: Props) {
+export default function SmartCAModal({
+  initPath, statusPath, collectSigner = true,
+  successText = 'Bản cam kết đã được ký số bằng SmartCA VNPT.',
+  onClose, onSigned,
+}: Props) {
   const [step, setStep] = useState<Step>('form')
   const [signerName, setSignerName] = useState('')
   const [signerTitle, setSignerTitle] = useState('')
@@ -55,7 +73,7 @@ export default function SmartCAModal({ commitmentId, onClose, onSigned }: Props)
     // Polling trạng thái mỗi 3s
     pollRef.current = setInterval(async () => {
       try {
-        const r = await api<{ status: string }>(`/hse/commitments/${commitmentId}/smartca/status`)
+        const r = await api<{ status: string }>(statusPath)
         if (r.status === 'signed') {
           clearInterval(pollRef.current!)
           clearInterval(countRef.current!)
@@ -74,12 +92,14 @@ export default function SmartCAModal({ commitmentId, onClose, onSigned }: Props)
   }
 
   const initSign = async () => {
-    if (!signerName.trim()) { setErrMsg('Nhập họ tên người ký.'); return }
+    if (collectSigner && !signerName.trim()) { setErrMsg('Nhập họ tên người ký.'); return }
     setBusy(true); setErrMsg('')
     try {
-      const r = await api<TxData>(`/hse/commitments/${commitmentId}/smartca/init`, {
+      const r = await api<TxData>(initPath, {
         method: 'POST',
-        body: { signer_name: signerName.trim(), signer_title: signerTitle.trim() },
+        body: collectSigner
+          ? { signer_name: signerName.trim(), signer_title: signerTitle.trim() }
+          : {},
       })
       setTx(r)
       setStep('qr')
@@ -120,21 +140,25 @@ export default function SmartCAModal({ commitmentId, onClose, onSigned }: Props)
         {/* Bước 1: Nhập thông tin người ký */}
         {step === 'form' && (
           <div className="space-y-3">
-            <input
-              type="text"
-              placeholder="Họ và tên người ký *"
-              value={signerName}
-              onChange={(e) => setSignerName(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
-              autoFocus
-            />
-            <input
-              type="text"
-              placeholder="Chức vụ"
-              value={signerTitle}
-              onChange={(e) => setSignerTitle(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
-            />
+            {collectSigner && (
+              <>
+                <input
+                  type="text"
+                  placeholder="Họ và tên người ký *"
+                  value={signerName}
+                  onChange={(e) => setSignerName(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
+                  autoFocus
+                />
+                <input
+                  type="text"
+                  placeholder="Chức vụ"
+                  value={signerTitle}
+                  onChange={(e) => setSignerTitle(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
+                />
+              </>
+            )}
             {errMsg && <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-600">{errMsg}</p>}
             <p className="text-xs text-slate-500">
               Sau khi tiếp tục, mở app <strong>SmartCA</strong> trên điện thoại và quét mã QR để ký.
@@ -193,7 +217,7 @@ export default function SmartCAModal({ commitmentId, onClose, onSigned }: Props)
             <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-full bg-green-100 text-3xl">
               ✅
             </div>
-            <p className="text-sm text-slate-600">Bản cam kết đã được ký số bằng SmartCA VNPT.</p>
+            <p className="text-sm text-slate-600">{successText}</p>
           </div>
         )}
 

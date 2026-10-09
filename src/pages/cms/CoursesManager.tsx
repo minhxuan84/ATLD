@@ -15,6 +15,7 @@ interface CourseRow {
   pass_score: number
   question_count: number
   validity_months: number | null
+  max_attempts: number
 }
 interface QuestionRow {
   id: number
@@ -61,7 +62,7 @@ export default function CoursesManager() {
   const [showNew, setShowNew] = useState(false)
   const [error, setError] = useState('')
 
-  const [newCourse, setNewCourse] = useState({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', summary: '' })
+  const [newCourse, setNewCourse] = useState({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', max_attempts: '', summary: '' })
   const [newQ, setNewQ] = useState<QuestionDraft>(emptyQuestion())
 
   // AI sinh nội dung khóa học từ prompt
@@ -76,7 +77,7 @@ export default function CoursesManager() {
 
   // Sửa khóa học
   const [editCourse, setEditCourse] = useState<string | null>(null)
-  const [courseDraft, setCourseDraft] = useState({ title: '', description: '', grp: '', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', summary: '' })
+  const [courseDraft, setCourseDraft] = useState({ title: '', description: '', grp: '', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', max_attempts: '', summary: '' })
   // Sửa câu hỏi
   const [editQ, setEditQ] = useState<number | null>(null)
   const [qDraft, setQDraft] = useState<QuestionDraft>(emptyQuestion())
@@ -137,7 +138,7 @@ export default function CoursesManager() {
         })
       }
       setShowNew(false)
-      setNewCourse({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', summary: '' })
+      setNewCourse({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', max_attempts: '', summary: '' })
       setAiQuestions([])
       setAiTopic('')
       setAiStep(null)
@@ -199,6 +200,8 @@ export default function CoursesManager() {
       title: c.title, description: c.description, grp: c.grp, branch_id: c.branch_id ? String(c.branch_id) : '',
       video_url: c.video_url, duration: c.duration, pass_score: c.pass_score,
       validity_months: c.validity_months == null ? '' : String(c.validity_months),
+      // 0 = không giới hạn, hiển thị thành ô trống cho khớp placeholder.
+      max_attempts: !c.max_attempts ? '' : String(c.max_attempts),
       summary: (c.summary ?? []).join('\n'),
     })
   }
@@ -391,6 +394,9 @@ export default function CoursesManager() {
           {/* Để trống = chứng chỉ không hết hạn. Hạn tính từ ngày đạt, dùng cho cảnh báo
               và cho đối chiếu khóa học JSA khi kiểm tra ATMT. */}
           <input type="number" min={0} value={newCourse.validity_months} onChange={(e) => setNewCourse({ ...newCourse, validity_months: e.target.value })} placeholder="Thời hạn chứng chỉ (tháng, trống = vô hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          {/* Trống = không giới hạn. Hết số lần mà vẫn chưa đạt thì hồ sơ NLĐ tương ứng
+              (đối chiếu theo CCCD) bị từ chối cấp quyền vào nhà máy. */}
+          <input type="number" min={0} max={20} value={newCourse.max_attempts} onChange={(e) => setNewCourse({ ...newCourse, max_attempts: e.target.value })} placeholder="Số lần thi tối đa (trống = không giới hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           <textarea value={newCourse.description} onChange={(e) => setNewCourse({ ...newCourse, description: e.target.value })} placeholder="Mô tả" rows={2} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           <textarea value={newCourse.summary} onChange={(e) => setNewCourse({ ...newCourse, summary: e.target.value })} placeholder="Tóm tắt nội dung (mỗi dòng 1 ý)" rows={3} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           {error && <p className="text-sm text-red-600 sm:col-span-2">{error}</p>}
@@ -409,7 +415,10 @@ export default function CoursesManager() {
               </button>
               <div className="min-w-0 flex-1">
                 <p className="font-semibold text-slate-800">{c.title}</p>
-                <p className="text-xs text-slate-400">{c.id} · {c.branch_name ?? 'Chưa phân loại'} · {c.grp} · {c.question_count} câu hỏi · đạt ≥ {c.pass_score}%</p>
+                <p className="text-xs text-slate-400">
+                  {c.id} · {c.branch_name ?? 'Chưa phân loại'} · {c.grp} · {c.question_count} câu hỏi · đạt ≥ {c.pass_score}%
+                  {c.max_attempts > 0 && ` · tối đa ${c.max_attempts} lần thi`}
+                </p>
               </div>
               <button onClick={() => startEditCourse(c)} className="rounded p-1.5 text-slate-400 hover:bg-vicem-50 hover:text-vicem-600" aria-label={`Sửa khóa học ${c.title}`}><Pencil className="h-4 w-4" /></button>
               <button onClick={() => deleteCourse(c.id)} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label="Xóa khóa học"><Trash2 className="h-4 w-4" /></button>
@@ -428,6 +437,7 @@ export default function CoursesManager() {
                   <input value={courseDraft.duration} onChange={(e) => setCourseDraft({ ...courseDraft, duration: e.target.value })} placeholder="Thời lượng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
                   <input type="number" value={courseDraft.pass_score} onChange={(e) => setCourseDraft({ ...courseDraft, pass_score: Number(e.target.value) })} placeholder="Điểm đạt (%)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
                   <input type="number" min={0} value={courseDraft.validity_months} onChange={(e) => setCourseDraft({ ...courseDraft, validity_months: e.target.value })} placeholder="Thời hạn chứng chỉ (tháng, trống = vô hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                  <input type="number" min={0} max={20} value={courseDraft.max_attempts} onChange={(e) => setCourseDraft({ ...courseDraft, max_attempts: e.target.value })} placeholder="Số lần thi tối đa (trống = không giới hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <input value={courseDraft.video_url} onChange={(e) => setCourseDraft({ ...courseDraft, video_url: e.target.value })} placeholder="URL video nhúng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <textarea value={courseDraft.description} onChange={(e) => setCourseDraft({ ...courseDraft, description: e.target.value })} placeholder="Mô tả" rows={2} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <textarea value={courseDraft.summary} onChange={(e) => setCourseDraft({ ...courseDraft, summary: e.target.value })} placeholder="Tóm tắt nội dung (mỗi dòng 1 ý)" rows={3} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />

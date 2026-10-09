@@ -10,6 +10,16 @@ export const jsaRouter = Router()
 
 // Guards: chỉ officer 'an-toan' và admin được ghi; đọc thì requireAuth.
 const canWrite = [requireAuth, requireSection('an-toan')]
+/**
+ * Pha E6: giấy phép làm việc là văn bản cho phép thi công trong nhà máy, không phải
+ * dữ liệu ai đăng nhập cũng tạo được. Trước đây các endpoint này chỉ gác requireAuth
+ * nên tài khoản 'trainee' (học viên) cũng tạo và sửa được permit.
+ *
+ * Các bước /workers, /hazards, /submit, /cancel vẫn kiểm thêm requester_id: người tạo
+ * hoặc admin. Siết cả nhóm về canInspect cho khớp, vì sau thay đổi này người tạo
+ * permit luôn có quyền inspect nên không chặn oan ai.
+ */
+const canInspect = [requireAuth, requireHse('inspect', 'approve')]
 
 // ═══════════════ LOẠI CÔNG VIỆC ═══════════════
 jsaRouter.get('/work-types', requireAuth, async (req, res) => {
@@ -412,7 +422,7 @@ jsaRouter.get('/permits/:id', requireAuth, async (req, res) => {
 })
 
 // POST /jsa/permits — tạo draft permit
-jsaRouter.post('/permits', requireAuth, async (req, res) => {
+jsaRouter.post('/permits', ...canInspect, async (req, res) => {
   const b = req.body ?? {}
   const siteId = Number(b.site_id)
   const workTypeId = b.work_type_id ? Number(b.work_type_id) : null
@@ -443,7 +453,7 @@ jsaRouter.post('/permits', requireAuth, async (req, res) => {
 })
 
 // PATCH /jsa/permits/:id — cập nhật draft
-jsaRouter.patch('/permits/:id', requireAuth, async (req, res) => {
+jsaRouter.patch('/permits/:id', ...canInspect, async (req, res) => {
   const id = Number(req.params.id)
   const scope = siteScope(req.user!)
 
@@ -496,7 +506,7 @@ jsaRouter.patch('/permits/:id', requireAuth, async (req, res) => {
 })
 
 // POST /jsa/permits/:id/workers — gán workers cho permit
-jsaRouter.post('/permits/:id/workers', requireAuth, async (req, res) => {
+jsaRouter.post('/permits/:id/workers', ...canInspect, async (req, res) => {
   const id = Number(req.params.id)
   const scope = siteScope(req.user!)
 
@@ -528,7 +538,7 @@ jsaRouter.post('/permits/:id/workers', requireAuth, async (req, res) => {
 })
 
 // POST /jsa/permits/:id/hazards — cập nhật hazards & controls
-jsaRouter.post('/permits/:id/hazards', requireAuth, async (req, res) => {
+jsaRouter.post('/permits/:id/hazards', ...canInspect, async (req, res) => {
   const id = Number(req.params.id)
   const scope = siteScope(req.user!)
 
@@ -578,7 +588,7 @@ jsaRouter.post('/permits/:id/hazards', requireAuth, async (req, res) => {
 })
 
 // POST /jsa/permits/:id/submit — submit permit cho approval
-jsaRouter.post('/permits/:id/submit', requireAuth, async (req, res) => {
+jsaRouter.post('/permits/:id/submit', ...canInspect, async (req, res) => {
   const id = Number(req.params.id)
   const scope = siteScope(req.user!)
 
@@ -769,7 +779,7 @@ jsaRouter.get('/permits/:id/pdf', requireAuth, async (req, res) => {
 })
 
 // POST /jsa/permits/:id/cancel — hủy permit
-jsaRouter.post('/permits/:id/cancel', requireAuth, async (req, res) => {
+jsaRouter.post('/permits/:id/cancel', ...canInspect, async (req, res) => {
   const id = Number(req.params.id)
   const scope = siteScope(req.user!)
 

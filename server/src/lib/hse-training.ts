@@ -74,6 +74,32 @@ export async function checkWorkerTraining(workTypeId: number, workerIds: number[
     ok: courses.rows.length === 0 || (results.length > 0 && results.every((w) => w.ok)) }
 }
 
+/**
+ * Tìm hồ sơ NLĐ ứng với một người đi thi (Pha E4, bước 11).
+ *
+ * Nối qua CCCD như checkWorkerTraining, KHÔNG qua user_id: hse_workers không có cột
+ * user_id, và NLĐ nhà thầu thường thi bằng tài khoản dùng chung. Ưu tiên CCCD khai
+ * trong bài thi, không có thì lấy từ tài khoản.
+ *
+ * Trả về mảng vì id_number không UNIQUE trong hse_workers.
+ */
+export async function findWorkersByTraineeIdentity(
+  userId: number,
+  traineeIdNumber: string | null,
+  runQuery: typeof query = query,
+): Promise<number[]> {
+  const r = await runQuery<{ id: number }>(
+    `SELECT w.id FROM atld.hse_workers w
+     WHERE ${identitySql('w.id_number')} IS NOT NULL
+       AND ${identitySql('w.id_number')} = COALESCE(
+             ${identitySql('$2::text')},
+             (SELECT ${identitySql('u.id_number')} FROM atld.users u WHERE u.id = $1))
+     ORDER BY w.id`,
+    [userId, traineeIdNumber ?? null],
+  )
+  return r.rows.map((x) => x.id)
+}
+
 export interface TrainingRecord {
   course_id: string; course_title: string; grp: string | null
   passed: boolean; quiz_score: number | null; pass_score: number

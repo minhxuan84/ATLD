@@ -259,34 +259,110 @@ export async function activeSuspensionReason(workerId: number): Promise<string |
   return `Đang bị đình chỉ (${who}): ${s.reason}`
 }
 
-// ── Đồng bộ trạng thái cổng worker/equipment (R3) ────────
+// ── Quyết định cho vào nhà máy (R3 + Pha E) ──────────────
+
+export interface AccessDecision {
+  /** Trạng thái sẽ ghi vào hse_workers.access_status. */
+  status: 'allowed' | 'blocked' | 'suspended' | 'revoked'
+  /** Mọi lý do bị chặn, rỗng khi được vào. */
+  reasons: string[]
+}
+
+/**
+ * Một chỗ duy nhất quyết định NLĐ có được vào nhà máy hay không.
+ *
+ * PHẢI gom về đây, không rải điều kiện ra từng nơi: /gate/log và /gate/lookup trước
+ * đây chỉ đọc access_status cho phần đình chỉ còn phần hồ sơ thì gọi
+ * evalWorkerEligibility trực tiếp. Thêm điều kiện mới (phê duyệt, hạn hiệu lực, thu
+ * hồi) chỉ trong syncWorkerAccess sẽ KHÔNG chặn được ở cổng — đúng loại lỗi Pha A.
+ *
+ * Thứ tự ưu tiên có ý nghĩa nghiệp vụ: thu hồi và đình chỉ là quyết định của con
+ * người, luôn thắng kết quả tính tự động từ hồ sơ.
+ */
+export async function evalWorkerAccess(workerId: number): Promise<AccessDecision> {
+  const w = await query<{
+    access_status: string
+    revoke_reason: string | null
+    revoke_note: string | null
+    entry_approval_status: string
+    entry_approval_note: string | null
+    access_valid_from: string | null
+    access_valid_to: string | null
+  }>(
+    `SELECT access_status, revoke_reason, revoke_note, entry_approval_status,
+            entry_approval_note, access_valid_from, access_valid_to
+     FROM atld.hse_workers WHERE id = $1`,
+    [workerId],
+  )
+  const row = w.rows[0]
+  if (!row) return { status: 'blocked', reasons: ['Không tìm thấy hồ sơ người lao động'] }
+
+  // 1. Thu hồi: khác đình chỉ ở chỗ KHÔNG tự khôi phục khi hồ sơ đủ lại. Chỉ cán bộ
+  //    gọi PATCH /workers/:id/restore-access mới đưa về luồng xét bình thường.
+  if (row.access_status === 'revoked') {
+    const label: Record<string, string> = {
+      contract_end: 'hết hợp đồng',
+      left_project: 'rời công trường',
+      serious_violation: 'vi phạm nghiêm trọng',
+      other: 'lý do khác',
+    }
+    const why = row.revoke_reason ? label[row.revoke_reason] ?? row.revoke_reason : null
+    return {
+      status: 'revoked',
+      reasons: [`Đã thu hồi quyền vào nhà máy${why ? ` (${why})` : ''}`
+        + (row.revoke_note ? `: ${row.revoke_note}` : '')],
+    }
+  }
+
+  // 2. Đình chỉ: quyết định của cấp phê duyệt, thắng kết quả xét hồ sơ.
+  const suspendReason = await activeSuspensionReason(workerId)
+  if (suspendReason) return { status: 'suspended', reasons: [suspendReason] }
+
+  // 3. Các điều kiện còn lại cộng dồn, để cán bộ thấy hết việc cần làm trong một lần
+  //    thay vì sửa xong một thứ mới hiện ra thứ tiếp theo.
+  const reasons: string[] = []
+
+  // E1 — phê duyệt cấp quyền (bước 6). Đủ hồ sơ vẫn chưa đủ để vào.
+  if (row.entry_approval_status !== 'approved') {
+    const label: Record<string, string> = {
+      pending: 'Chưa được phê duyệt cấp quyền vào nhà máy',
+      returned: 'Hồ sơ bị trả lại, chờ bổ sung',
+      rejected: 'Bị từ chối cấp quyền vào nhà máy',
+    }
+    reasons.push((label[row.entry_approval_status] ?? 'Chưa được phê duyệt cấp quyền')
+      + (row.entry_approval_note ? `: ${row.entry_approval_note}` : ''))
+  }
+
+  // E2 — hiệu lực theo ngày. So phần ngày dạng chuỗi như evalWorkerEligibility, vì
+  // pg trả DATE là chuỗi 'yyyy-mm-dd' (xem setTypeParser trong db.ts).
+  const today = new Date().toISOString().slice(0, 10)
+  const from = row.access_valid_from ? String(row.access_valid_from).slice(0, 10) : null
+  const to = row.access_valid_to ? String(row.access_valid_to).slice(0, 10) : null
+  if (from && today < from) reasons.push(`Quyền vào nhà máy chỉ có hiệu lực từ ${from}`)
+  if (to && today > to) reasons.push(`Quyền vào nhà máy đã hết hiệu lực từ ${to}`)
+
+  // R3 — hồ sơ bắt buộc theo chức danh và mức rủi ro hợp đồng.
+  const el = await evalWorkerEligibility(workerId)
+  if (!el.ok) reasons.push(`Thiếu hồ sơ: ${el.missing.join('; ')}`)
+
+  return { status: reasons.length === 0 ? 'allowed' : 'blocked', reasons }
+}
+
 // Trả về trạng thái vừa ghi để caller khỏi SELECT lại (và để endpoint trả về cho UI).
 export async function syncWorkerAccess(
   workerId: number,
-): Promise<'allowed' | 'blocked' | 'suspended'> {
-  // Cổng kiểm soát đọc chính access_status để biết ai bị đình chỉ (xem /gate/log và
-  // /gate/lookup trong hse.ts). Nếu ở đây ghi 'allowed'/'blocked' vô điều kiện thì mỗi
-  // lần duyệt hồ sơ, gán NLĐ vào hợp đồng hay chạy sync toàn bộ đều âm thầm gỡ đình chỉ
-  // — người bị đình chỉ vào lại nhà máy được trong khi lệnh vẫn còn 'issued'.
-  // Vì vậy đình chỉ luôn thắng kết quả xét hồ sơ.
-  const suspendReason = await activeSuspensionReason(workerId)
-  if (suspendReason) {
-    await query(
-      `UPDATE atld.hse_workers SET access_status = 'suspended', access_block_reason = $1,
-                                   updated_at = now()
-       WHERE id = $2`,
-      [suspendReason, workerId],
-    )
-    return 'suspended'
-  }
-  const el = await evalWorkerEligibility(workerId)
-  const status = el.ok ? 'allowed' : 'blocked'
+): Promise<'allowed' | 'blocked' | 'suspended' | 'revoked'> {
+  // Toàn bộ điều kiện nằm trong evalWorkerAccess. Hàm này chỉ ghi kết quả xuống DB.
+  // Thu hồi thì không ghi lại gì: access_status đã là 'revoked' và ghi đè
+  // access_block_reason sẽ xóa lý do thu hồi cán bộ đã nhập.
+  const d = await evalWorkerAccess(workerId)
+  if (d.status === 'revoked') return 'revoked'
   await query(
     `UPDATE atld.hse_workers SET access_status = $1, access_block_reason = $2, updated_at = now()
      WHERE id = $3`,
-    [status, el.ok ? null : el.missing.join('; '), workerId],
+    [d.status, d.reasons.length ? d.reasons.join('; ') : null, workerId],
   )
-  return status
+  return d.status
 }
 
 // Trả trạng thái vừa ghi như syncWorkerAccess: PATCH /equipment-docs/:id đã serialize
