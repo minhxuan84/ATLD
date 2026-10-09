@@ -28,6 +28,9 @@ const QuizFieldsManager = lazy(() => import('./pages/cms/QuizFieldsManager'))
 const MenuManager = lazy(() => import('./pages/cms/MenuManager'))
 const LdapConfigPage = lazy(() => import('./pages/cms/LdapConfigPage'))
 const SmartCAConfigPage = lazy(() => import('./pages/cms/SmartCAConfigPage'))
+const WorkerDeclarePage = lazy(() => import('./pages/portal/WorkerDeclarePage'))
+const FieldReportPage = lazy(() => import('./pages/portal/FieldReportPage'))
+const CapaResponsePage = lazy(() => import('./pages/portal/CapaResponsePage'))
 
 function Protected({ children, role }: { children: ReactNode; role?: 'admin' }) {
   const { user, loading } = useAuth()
@@ -100,6 +103,13 @@ export default function App() {
         <Route path="ldap" element={<LdapConfigPage />} />
         <Route path="smartca" element={<SmartCAConfigPage />} />
       </Route>
+
+      {/* Cổng khai báo cho nhà thầu — mở bằng link có token, KHÔNG cần đăng nhập.
+          Đặt ngoài PublicShell: người mở là nhà thầu không có tài khoản, Header với
+          các liên kết nội bộ và nút đăng nhập chỉ gây nhiễu. */}
+      <Route path="/khai-bao/:token" element={<WorkerDeclarePage />} />
+      <Route path="/bao-an-toan/:token" element={<FieldReportPage />} />
+      <Route path="/khac-phuc/:token" element={<CapaResponsePage />} />
 
       {/* Toàn bộ trang công khai */}
       <Route path="/*" element={<PublicShell />} />

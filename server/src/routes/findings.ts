@@ -10,10 +10,12 @@
 import { Router } from 'express'
 import path from 'node:path'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 import { query } from '../db.js'
 import { requireAuth, requireHse, siteScope, type AuthUser } from '../auth.js'
 import { audit, clientIp, upload, UPLOAD_DIR, syncWorkerAccess } from '../lib/hse-core.js'
 import { escapeText, sanitizeFileName } from '../util.js'
+import { hashToken } from './portal.js'
 
 export const findingsRouter = Router()
 
@@ -512,6 +514,287 @@ findingsRouter.patch('/:id/cancel', ...canApprove, async (req, res) => {
   await audit(req.user!, 'FINDING_CANCEL', 'finding', f.id, { status: f.status },
     { status: 'cancelled', reason }, clientIp(req))
   res.json({ ok: true, status: 'cancelled' })
+})
+
+// ═══════════════ Pha D — QUẢN TRỊ LINK CÔNG KHAI ═══════════════
+// Đặt ở đây vì findings.ts đã có canInspect/canApprove và cùng vòng nghiệp vụ;
+// phần công khai không cần auth nằm riêng ở routes/portal.ts.
+
+/** Hạn mặc định của link: 14 ngày. */
+const TOKEN_DAYS_DEFAULT = 14
+
+findingsRouter.get('/portal-tokens/list', ...canInspect, async (req, res) => {
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query(
+    `SELECT t.id, t.purpose, t.label, t.contractor_id, t.contract_id, t.finding_id,
+            t.site_id, t.expires_at, t.max_uses, t.used_count, t.revoked_at, t.created_at,
+            ct.name AS contractor_name, c.contract_no, f.finding_no,
+            cu.full_name AS created_by_name,
+            (SELECT count(*)::int FROM atld.hse_worker_submissions s
+             WHERE s.token_id = t.id AND s.status = 'pending') AS pending_count
+     FROM atld.hse_portal_tokens t
+     LEFT JOIN atld.hse_contractors ct ON ct.id = t.contractor_id
+     LEFT JOIN atld.hse_contracts c ON c.id = t.contract_id
+     LEFT JOIN atld.hse_findings f ON f.id = t.finding_id
+     LEFT JOIN atld.users cu ON cu.id = t.created_by
+     WHERE ($1::boolean OR t.site_id = $2 OR c.site_id = $2)
+     ORDER BY t.created_at DESC`,
+    [all, siteId],
+  )
+  res.json({ tokens: r.rows })
+})
+
+findingsRouter.post('/portal-tokens', ...canInspect, async (req, res) => {
+  const b = req.body ?? {}
+  const purpose = String(b.purpose ?? '')
+  if (!['worker_declare', 'field_report', 'capa_response'].includes(purpose))
+    return res.status(400).json({ error: 'Mục đích link không hợp lệ.' })
+
+  const { all, siteId } = siteScope(req.user!)
+  const contractId = b.contract_id ? Number(b.contract_id) : null
+  let site = all ? (b.site_id ? Number(b.site_id) : null) : siteId
+  if (contractId) {
+    const c = await query<{ id: number; site_id: number | null; contractor_id: number }>(
+      `SELECT id, site_id, contractor_id FROM atld.hse_contracts
+       WHERE id = $1 AND ($2::boolean OR site_id = $3)`, [contractId, all, siteId])
+    if (!c.rows[0]) return res.status(404).json({ error: 'Không tìm thấy hợp đồng.' })
+    site = site ?? c.rows[0].site_id
+  }
+  const findingId = b.finding_id ? Number(b.finding_id) : null
+  if (purpose === 'capa_response') {
+    if (!findingId)
+      return res.status(400).json({ error: 'Link phản hồi khắc phục cần phiếu phát hiện.' })
+    if (!(await findingInScope(findingId, req.user!)))
+      return res.status(404).json({ error: 'Không tìm thấy phiếu phát hiện.' })
+  }
+  // Khai báo NLĐ buộc gắn nhà thầu: hse_workers.contractor_id là NOT NULL nên bản
+  // khai không gắn nhà thầu sẽ không duyệt được thành hồ sơ NLĐ.
+  const contractorId = b.contractor_id ? Number(b.contractor_id) : null
+  if (purpose === 'worker_declare' && !contractorId)
+    return res.status(400).json({ error: 'Link khai báo NLĐ phải gắn nhà thầu.' })
+  if (contractorId) {
+    const ct = await query<{ id: number }>(
+      `SELECT id FROM atld.hse_contractors WHERE id = $1`, [contractorId])
+    if (!ct.rows[0]) return res.status(404).json({ error: 'Không tìm thấy nhà thầu.' })
+  }
+  if (!site) return res.status(400).json({ error: 'Phải chọn nhà máy / chi nhánh.' })
+
+  const days = Math.min(Math.max(Number(b.days) || TOKEN_DAYS_DEFAULT, 1), 180)
+  const maxUses = b.max_uses === null || b.max_uses === undefined || b.max_uses === ''
+    ? null : Math.min(Math.max(Number(b.max_uses), 1), 10000)
+
+  // 32 byte ngẫu nhiên, không dùng randomUUID: đây là bí mật truy cập nên cần
+  // entropy cao hơn UUID v4. DB chỉ giữ SHA-256, token thô chỉ trả về đúng lần này.
+  const raw = crypto.randomBytes(32).toString('base64url')
+  const r = await query<{ id: number }>(
+    `INSERT INTO atld.hse_portal_tokens
+       (token_hash, purpose, label, contractor_id, contract_id, finding_id, site_id,
+        expires_at, max_uses, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7, now() + ($8 || ' days')::interval, $9, $10)
+     RETURNING id`,
+    [hashToken(raw), purpose, escapeText(String(b.label ?? '').trim()) || null,
+     contractorId, contractId, purpose === 'capa_response' ? findingId : null,
+     site, String(days), maxUses, req.user!.id],
+  )
+  await audit(req.user!, 'PORTAL_TOKEN_CREATE', 'portal_token', r.rows[0]!.id, null,
+    { purpose, contractorId, contractId, findingId, days, maxUses }, clientIp(req))
+  // token thô KHÔNG vào audit log — log là nơi đọc được rộng hơn danh sách link.
+  res.status(201).json({ id: r.rows[0]!.id, token: raw, expires_in_days: days })
+})
+
+findingsRouter.delete('/portal-tokens/:id', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query<{ id: number }>(
+    `UPDATE atld.hse_portal_tokens t SET revoked_at = now(), revoked_by = $1
+     WHERE t.id = $2 AND t.revoked_at IS NULL
+       AND ($3::boolean OR t.site_id = $4)
+     RETURNING t.id`,
+    [req.user!.id, id, all, siteId])
+  if (!r.rows[0]) return res.status(404).json({ error: 'Không tìm thấy link còn hiệu lực.' })
+  await audit(req.user!, 'PORTAL_TOKEN_REVOKE', 'portal_token', id, null, null, clientIp(req))
+  res.json({ ok: true })
+})
+
+// ═══════════════ Pha D — DUYỆT HÀNG CHỜ KHAI BÁO ═══════════════
+findingsRouter.get('/submissions/list', ...canInspect, async (req, res) => {
+  const { all, siteId } = siteScope(req.user!)
+  const status = req.query.status ? String(req.query.status) : 'pending'
+  const r = await query(
+    `SELECT s.id, s.payload, s.status, s.review_note, s.reviewed_at, s.worker_id,
+            s.created_at, s.submitted_ip,
+            t.purpose, t.label, t.contractor_id, t.contract_id,
+            ct.name AS contractor_name, c.contract_no,
+            ru.full_name AS reviewed_by_name,
+            (SELECT count(*)::int FROM atld.hse_submission_files sf
+             WHERE sf.submission_id = s.id) AS file_count,
+            -- hse_workers.id_number không UNIQUE (xem POST /hse/workers cũng không
+            -- kiểm), nên duyệt hai bản khai cùng CCCD sẽ ra hai hồ sơ cho một người.
+            -- Trả hồ sơ trùng ra để cán bộ thấy trước khi bấm duyệt.
+            (SELECT w2.full_name FROM atld.hse_workers w2
+             WHERE w2.id_number IS NOT NULL
+               AND w2.id_number = (s.payload->>'id_number')
+             ORDER BY w2.id LIMIT 1) AS dup_worker_name,
+            (SELECT w2.id FROM atld.hse_workers w2
+             WHERE w2.id_number IS NOT NULL
+               AND w2.id_number = (s.payload->>'id_number')
+             ORDER BY w2.id LIMIT 1) AS dup_worker_id
+     FROM atld.hse_worker_submissions s
+     JOIN atld.hse_portal_tokens t ON t.id = s.token_id
+     LEFT JOIN atld.hse_contractors ct ON ct.id = t.contractor_id
+     LEFT JOIN atld.hse_contracts c ON c.id = t.contract_id
+     LEFT JOIN atld.users ru ON ru.id = s.reviewed_by
+     WHERE ($1::boolean OR t.site_id = $2)
+       AND ($3::text = 'all' OR s.status = $3)
+     ORDER BY s.created_at DESC`,
+    [all, siteId, status],
+  )
+  res.json({ submissions: r.rows })
+})
+
+interface SubmissionPayload {
+  full_name?: string
+  id_number?: string
+  birth_date?: string | null
+  gender?: string | null
+  job_title?: string | null
+  phone?: string | null
+  email?: string | null
+  address?: string | null
+  blood_type?: string | null
+  emergency_contact?: string | null
+  emergency_phone?: string | null
+  note?: string | null
+}
+
+/**
+ * Duyệt bản khai → tạo hồ sơ NLĐ thật.
+ * Đây là biên giới tin cậy: dữ liệu nhà thầu nộp chỉ thành hồ sơ NLĐ sau bước này.
+ * NLĐ mới vẫn ở access_status mặc định 'blocked' cho tới khi đủ hồ sơ.
+ */
+findingsRouter.patch('/submissions/:id/review', ...canInspect, async (req, res) => {
+  const id = Number(req.params.id)
+  const decision = String(req.body?.decision ?? '')
+  if (!['approved', 'rejected'].includes(decision))
+    return res.status(400).json({ error: 'Quyết định phải là "approved" hoặc "rejected".' })
+  const note = escapeText(String(req.body?.review_note ?? '').trim()) || null
+
+  const { all, siteId } = siteScope(req.user!)
+  const s = await query<{
+    id: number; payload: SubmissionPayload; status: string
+    contractor_id: number | null; contract_id: number | null; token_site: number | null
+  }>(
+    `SELECT s.id, s.payload, s.status, t.contractor_id, t.contract_id, t.site_id AS token_site
+     FROM atld.hse_worker_submissions s
+     JOIN atld.hse_portal_tokens t ON t.id = s.token_id
+     WHERE s.id = $1 AND ($2::boolean OR t.site_id = $3)`,
+    [id, all, siteId])
+  if (!s.rows[0]) return res.status(404).json({ error: 'Không tìm thấy bản khai.' })
+  if (s.rows[0].status !== 'pending')
+    return res.status(400).json({ error: 'Bản khai này đã được xử lý.' })
+
+  if (decision === 'rejected') {
+    await query(
+      `UPDATE atld.hse_worker_submissions
+       SET status = 'rejected', review_note = $1, reviewed_by = $2, reviewed_at = now()
+       WHERE id = $3`, [note, req.user!.id, id])
+    await audit(req.user!, 'SUBMISSION_REJECT', 'worker_submission', id, null,
+      { note }, clientIp(req))
+    return res.json({ ok: true, status: 'rejected' })
+  }
+
+  const p = s.rows[0].payload ?? {}
+  if (!s.rows[0].contractor_id)
+    return res.status(400).json({ error: 'Bản khai không gắn nhà thầu, không tạo được hồ sơ NLĐ.' })
+  if (!p.full_name)
+    return res.status(400).json({ error: 'Bản khai thiếu họ tên, không tạo được hồ sơ NLĐ.' })
+
+  // id_number không UNIQUE trong hse_workers, nên trùng CCCD sẽ ra hai hồ sơ cho một
+  // người — hai bộ hồ sơ, hai trạng thái ra/vào cổng, không bên nào đúng. Chặn ở đây
+  // và buộc cán bộ xác nhận có chủ ý (link_existing) nếu thật sự là người khác.
+  if (p.id_number) {
+    const dup = await query<{ id: number; full_name: string }>(
+      `SELECT id, full_name FROM atld.hse_workers
+       WHERE id_number = $1 ORDER BY id LIMIT 1`, [p.id_number])
+    if (dup.rows[0] && req.body?.allow_duplicate !== true)
+      return res.status(409).json({
+        error: `Đã có hồ sơ NLĐ với CCCD này: ${dup.rows[0].full_name} (mã ${dup.rows[0].id}). `
+          + 'Kiểm tra lại trước khi tạo hồ sơ thứ hai cho cùng một người.',
+        duplicate_worker_id: dup.rows[0].id,
+      })
+  }
+
+  const w = await query<{ id: number }>(
+    `INSERT INTO atld.hse_workers
+       (contractor_id, full_name, id_number, birth_date, gender, job_title, phone,
+        email, address, blood_type, emergency_contact, emergency_phone, note,
+        worker_type, site_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'contractor',$14)
+     RETURNING id`,
+    [s.rows[0].contractor_id, p.full_name, p.id_number ?? null,
+     p.birth_date ?? null, p.gender ?? null, p.job_title ?? null, p.phone ?? null,
+     p.email ?? null, p.address ?? null, p.blood_type ?? null,
+     p.emergency_contact ?? null, p.emergency_phone ?? null, p.note ?? null,
+     s.rows[0].token_site],
+  )
+  const workerId = w.rows[0]!.id
+  // Gán vào hợp đồng nếu token có hợp đồng, để engine xét điều kiện biết mức rủi ro.
+  if (s.rows[0].contract_id) {
+    await query(
+      `INSERT INTO atld.hse_contract_workers (contract_id, worker_id)
+       VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      [s.rows[0].contract_id, workerId])
+  }
+  // Chuyển file nhà thầu đã nộp thành hồ sơ chờ duyệt của NLĐ (status 'pending' —
+  // cán bộ vẫn phải duyệt từng hồ sơ, bước này chỉ đính kèm).
+  const files = await query<{ doc_type_id: number | null; file_name: string; stored_name: string }>(
+    `SELECT doc_type_id, file_name, stored_name FROM atld.hse_submission_files
+     WHERE submission_id = $1 AND doc_type_id IS NOT NULL`, [id])
+  for (const f of files.rows) {
+    await query(
+      `INSERT INTO atld.hse_worker_docs
+         (worker_id, doc_type_id, file_name, stored_name, status, uploaded_by)
+       VALUES ($1,$2,$3,$4,'pending',$5)`,
+      [workerId, f.doc_type_id, f.file_name, f.stored_name, req.user!.id])
+  }
+  await query(
+    `UPDATE atld.hse_worker_submissions
+     SET status = 'approved', review_note = $1, reviewed_by = $2, reviewed_at = now(),
+         worker_id = $3
+     WHERE id = $4`, [note, req.user!.id, workerId, id])
+  // Tính access_status ngay: NLĐ mới thiếu hồ sơ nên sẽ là 'blocked' kèm lý do.
+  const status = await syncWorkerAccess(workerId)
+  await audit(req.user!, 'SUBMISSION_APPROVE', 'worker_submission', id, null,
+    { workerId, attachedDocs: files.rows.length, accessStatus: status }, clientIp(req))
+  res.json({ ok: true, status: 'approved', worker_id: workerId, access_status: status })
+})
+
+findingsRouter.get('/submissions/:id/files', ...canInspect, async (req, res) => {
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query(
+    `SELECT sf.id, sf.doc_type_id, sf.file_name, sf.uploaded_at, dt.name AS doc_type_name
+     FROM atld.hse_submission_files sf
+     JOIN atld.hse_worker_submissions s ON s.id = sf.submission_id
+     JOIN atld.hse_portal_tokens t ON t.id = s.token_id
+     LEFT JOIN atld.hse_doc_types dt ON dt.id = sf.doc_type_id
+     WHERE sf.submission_id = $1 AND ($2::boolean OR t.site_id = $3)
+     ORDER BY sf.uploaded_at`,
+    [Number(req.params.id), all, siteId])
+  res.json({ files: r.rows })
+})
+
+findingsRouter.get('/submission-files/:fileId/download', ...canInspect, async (req, res) => {
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query<{ file_name: string; stored_name: string }>(
+    `SELECT sf.file_name, sf.stored_name FROM atld.hse_submission_files sf
+     JOIN atld.hse_worker_submissions s ON s.id = sf.submission_id
+     JOIN atld.hse_portal_tokens t ON t.id = s.token_id
+     WHERE sf.id = $1 AND ($2::boolean OR t.site_id = $3)`,
+    [Number(req.params.fileId), all, siteId])
+  if (!r.rows[0]) return res.status(404).json({ error: 'Không tìm thấy tệp.' })
+  const filePath = path.join(UPLOAD_DIR, r.rows[0].stored_name)
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Tệp không còn trên máy chủ.' })
+  res.download(filePath, r.rows[0].file_name)
 })
 
 // ═══════════════ ẢNH MINH CHỨNG ═══════════════

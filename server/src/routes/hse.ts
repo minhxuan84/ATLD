@@ -859,6 +859,77 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
       EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
     await query(`CREATE INDEX IF NOT EXISTS idx_hse_finding_photos_finding
       ON atld.hse_finding_photos(finding_id, phase)`)
+
+    // ── Pha D: cổng khai báo công khai có token ───────────
+    // Nhà thầu không có tài khoản trong hệ thống, nhưng quy trình cần họ tự khai báo
+    // NLĐ, báo điều kiện không an toàn và phản hồi khắc phục. Mỗi link là một token
+    // gắn sẵn nhà thầu/hợp đồng, có hạn và có số lần dùng.
+    await query(`CREATE TABLE IF NOT EXISTS atld.hse_portal_tokens (
+      id SERIAL PRIMARY KEY,
+      token_hash VARCHAR(64) UNIQUE NOT NULL,
+      purpose VARCHAR(20) NOT NULL,
+      label VARCHAR(200),
+      contractor_id INTEGER REFERENCES atld.hse_contractors(id) ON DELETE CASCADE,
+      contract_id INTEGER REFERENCES atld.hse_contracts(id) ON DELETE CASCADE,
+      finding_id INTEGER REFERENCES atld.hse_findings(id) ON DELETE CASCADE,
+      site_id INTEGER REFERENCES atld.branches(id) ON DELETE SET NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      max_uses INTEGER,
+      used_count INTEGER NOT NULL DEFAULT 0,
+      revoked_at TIMESTAMPTZ,
+      revoked_by INTEGER,
+      created_by INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_portal_tokens ADD CONSTRAINT hse_portal_tokens_purpose_chk
+          CHECK (purpose IN ('worker_declare','field_report','capa_response'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_portal_tokens_active
+      ON atld.hse_portal_tokens(expires_at) WHERE revoked_at IS NULL`)
+
+    // Hàng chờ: dữ liệu từ ngoài KHÔNG ghi thẳng vào hse_workers. Cán bộ ATVSLĐ duyệt
+    // mới tạo hồ sơ NLĐ thật — đây là biên giới tin cậy, vì hồ sơ NLĐ dẫn tới quyền
+    // vào nhà máy.
+    await query(`CREATE TABLE IF NOT EXISTS atld.hse_worker_submissions (
+      id SERIAL PRIMARY KEY,
+      token_id INTEGER NOT NULL REFERENCES atld.hse_portal_tokens(id) ON DELETE CASCADE,
+      payload JSONB NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      review_note TEXT,
+      reviewed_by INTEGER,
+      reviewed_at TIMESTAMPTZ,
+      worker_id INTEGER REFERENCES atld.hse_workers(id) ON DELETE SET NULL,
+      submitted_ip VARCHAR(50),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_worker_submissions ADD CONSTRAINT hse_worker_submissions_status_chk
+          CHECK (status IN ('pending','approved','rejected'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_worker_submissions_status
+      ON atld.hse_worker_submissions(status, created_at DESC)`)
+
+    // File nhà thầu nộp kèm bản khai — giữ riêng, chỉ gắn vào hồ sơ NLĐ khi được duyệt.
+    await query(`CREATE TABLE IF NOT EXISTS atld.hse_submission_files (
+      id SERIAL PRIMARY KEY,
+      submission_id INTEGER NOT NULL REFERENCES atld.hse_worker_submissions(id) ON DELETE CASCADE,
+      doc_type_id INTEGER REFERENCES atld.hse_doc_types(id) ON DELETE SET NULL,
+      file_name VARCHAR(255) NOT NULL,
+      stored_name VARCHAR(255) NOT NULL,
+      uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_submission_files_sub
+      ON atld.hse_submission_files(submission_id)`)
+
+    // Phiếu do token công khai tạo thì ghi lại chính token đó. Endpoint gắn ảnh của
+    // cổng công khai dựa vào cột này để chỉ cho gắn ảnh vào phiếu của riêng mình —
+    // nếu đối chiếu theo contractor_id thì token không gắn nhà thầu sẽ gắn được ảnh
+    // vào mọi phiếu field_report của nhà máy.
+    await query(`ALTER TABLE atld.hse_findings ADD COLUMN IF NOT EXISTS
+      portal_token_id INTEGER REFERENCES atld.hse_portal_tokens(id) ON DELETE SET NULL`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }

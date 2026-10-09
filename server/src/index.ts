@@ -11,6 +11,7 @@ import { coursesRouter } from './routes/courses.js'
 import { documentsRouter } from './routes/documents.js'
 import { hseRouter } from './routes/hse.js'
 import { findingsRouter } from './routes/findings.js'
+import { portalRouter } from './routes/portal.js'
 import { jsaRouter } from './routes/jsa.js'
 import { newsRouter } from './routes/news.js'
 import { adminRouter } from './routes/admin.js'
@@ -61,6 +62,9 @@ app.use('/api/hse', hseRouter)
 // Bảng hse_findings tạo trong IIFE migration của hse.ts (cùng quy ước với jsa_*),
 // nên router này phải mount sau hseRouter.
 app.use('/api/findings', findingsRouter)
+// Cổng công khai: KHÔNG qua requireAuth, mỗi request tự xác thực bằng token trong URL.
+// Cũng mount sau hseRouter vì bảng hse_portal_tokens tạo trong IIFE migration của hse.ts.
+app.use('/api/portal', portalRouter)
 app.use('/api/jsa', jsaRouter)
 app.use('/api/news', newsRouter)
 app.use('/api/admin', adminRouter)
