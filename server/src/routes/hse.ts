@@ -743,6 +743,122 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
       EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
     await query(`CREATE INDEX IF NOT EXISTS idx_hse_suspensions_worker
       ON atld.hse_suspensions(worker_id, status) WHERE worker_id IS NOT NULL`)
+
+    // ── Pha C: phiếu phát hiện + vòng CAPA ────────────────
+    // Quy trình kiểm tra định kỳ đi theo trục "mỗi phát hiện một phiếu, chạy hết 8 bước";
+    // hse_inspections đi theo trục "một phiếu kiểm tra theo hợp đồng kèm checklist".
+    // Giữ nguyên bảng cũ, thêm thực thể phát hiện độc lập để ghi được cả phát hiện
+    // ngoài kỳ kiểm tra (báo hiện trường) lẫn phát hiện sinh ra từ một phiếu kiểm tra.
+    await query(`CREATE TABLE IF NOT EXISTS atld.hse_findings (
+      id SERIAL PRIMARY KEY,
+      finding_no VARCHAR(50) UNIQUE NOT NULL,
+      -- B1 ghi nhận
+      source VARCHAR(20) NOT NULL DEFAULT 'periodic',
+      finding_type VARCHAR(20) NOT NULL DEFAULT 'unsafe_condition',
+      check_period VARCHAR(10),
+      site_id INTEGER REFERENCES atld.branches(id) ON DELETE SET NULL,
+      area VARCHAR(200),
+      contractor_id INTEGER REFERENCES atld.hse_contractors(id) ON DELETE SET NULL,
+      contract_id INTEGER REFERENCES atld.hse_contracts(id) ON DELETE SET NULL,
+      work_type_id INTEGER REFERENCES atld.jsa_work_types(id) ON DELETE SET NULL,
+      worker_id INTEGER REFERENCES atld.hse_workers(id) ON DELETE SET NULL,
+      inspection_id INTEGER REFERENCES atld.hse_inspections(id) ON DELETE SET NULL,
+      description TEXT NOT NULL,
+      reporter_name VARCHAR(200),
+      detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      -- B2 đánh giá
+      risk_level VARCHAR(10),
+      affects_worker BOOLEAN,
+      accident_risk VARCHAR(10),
+      has_injury BOOLEAN,
+      assess_basis TEXT,
+      assessed_by INTEGER,
+      assessed_at TIMESTAMPTZ,
+      -- B3 đình chỉ (dùng lại hse_suspensions của Pha B)
+      suspension_id INTEGER REFERENCES atld.hse_suspensions(id) ON DELETE SET NULL,
+      -- B4 giao khắc phục
+      capa_requirement TEXT,
+      responsible_org VARCHAR(200),
+      responsible_person INTEGER,
+      capa_due_at TIMESTAMPTZ,
+      assigned_by INTEGER,
+      assigned_at TIMESTAMPTZ,
+      -- B5 khắc phục
+      capa_action TEXT,
+      capa_done_at TIMESTAMPTZ,
+      capa_done_by INTEGER,
+      root_cause TEXT,
+      preventive_action TEXT,
+      -- B6 xác minh
+      verify_result VARCHAR(10),
+      verified_by INTEGER,
+      verified_at TIMESTAMPTZ,
+      verify_note TEXT,
+      -- B7 duyệt làm tiếp
+      resume_decision VARCHAR(20),
+      resume_by INTEGER,
+      resume_at TIMESTAMPTZ,
+      -- B8 đóng phiếu
+      status VARCHAR(20) NOT NULL DEFAULT 'new',
+      closed_at TIMESTAMPTZ,
+      closed_by INTEGER,
+      closed_on_time BOOLEAN,
+      return_count INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    // Người khắc phục không được tự xác minh mình đã khắc phục xong (bước 6 của quy
+    // trình). Chặn ở DB để một endpoint mới quên kiểm cũng không lọt được.
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_findings ADD CONSTRAINT hse_findings_verifier_chk
+          CHECK (verified_by IS NULL OR responsible_person IS NULL
+                 OR verified_by <> responsible_person);
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_findings ADD CONSTRAINT hse_findings_status_chk
+          CHECK (status IN ('new','assessed','suspended','capa_assigned','capa_done',
+                            'verifying','verified','resume_approved','closed','cancelled'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_findings ADD CONSTRAINT hse_findings_risk_chk
+          CHECK (risk_level IS NULL OR risk_level IN ('high','low'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_findings_status
+      ON atld.hse_findings(status, detected_at DESC)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_findings_site
+      ON atld.hse_findings(site_id, status)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_findings_contract
+      ON atld.hse_findings(contract_id)`)
+    // Quét phiếu quá hạn khắc phục — cột lọc chính là hạn + trạng thái.
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_findings_due
+      ON atld.hse_findings(capa_due_at) WHERE capa_due_at IS NOT NULL`)
+
+    // Số phiếu cấp từ sequence, không đếm count(*): hai cán bộ ghi cùng lúc sẽ ra
+    // cùng một số nếu tính bằng count, và finding_no là UNIQUE nên một bên mất phiếu.
+    await query(`CREATE SEQUENCE IF NOT EXISTS atld.hse_finding_no_seq`)
+
+    // Ảnh cả hai thời điểm: lúc phát hiện và sau khi khắc phục (để so sánh khi xác minh).
+    await query(`CREATE TABLE IF NOT EXISTS atld.hse_finding_photos (
+      id SERIAL PRIMARY KEY,
+      finding_id INTEGER NOT NULL REFERENCES atld.hse_findings(id) ON DELETE CASCADE,
+      phase VARCHAR(10) NOT NULL DEFAULT 'detect',
+      file_name VARCHAR(255) NOT NULL,
+      stored_name VARCHAR(255) NOT NULL,
+      caption TEXT,
+      uploaded_by INTEGER,
+      uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_finding_photos ADD CONSTRAINT hse_finding_photos_phase_chk
+          CHECK (phase IN ('detect','capa','verify'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_hse_finding_photos_finding
+      ON atld.hse_finding_photos(finding_id, phase)`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }

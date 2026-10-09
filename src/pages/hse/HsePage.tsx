@@ -10,6 +10,7 @@ const DossiersPage = lazy(() => import('./DossiersPage'))
 const CommitmentsPage = lazy(() => import('./CommitmentsPage'))
 const InspectionsPage = lazy(() => import('./InspectionsPage'))
 const SuspensionsPage = lazy(() => import('./SuspensionsPage'))
+const FindingsPage = lazy(() => import('./FindingsPage'))
 const GatePage = lazy(() => import('./GatePage'))
 const VisitorsPage = lazy(() => import('./VisitorsPage'))
 const EvaluationsPage = lazy(() => import('./EvaluationsPage'))
@@ -34,6 +35,7 @@ export default function HsePage() {
     { to: 'khach', label: 'Khách & NCC', show: canHse(user, 'gate', 'inspect', 'approve') },
     { to: 'danh-gia', label: 'Đánh giá định kỳ', show: canHse(user, 'inspect', 'approve') },
     { to: 'kiem-tra', label: 'Kiểm tra ATMT', show: canHse(user, 'inspect', 'approve') },
+    { to: 'phat-hien', label: 'Phiếu phát hiện', show: canHse(user, 'inspect', 'approve') },
     { to: 'dinh-chi', label: 'Đình chỉ công việc', show: canHse(user, 'approve') },
     { to: 'giay-phep', label: 'Giấy phép làm việc', show: canHse(user, 'inspect', 'approve') },
     { to: 'cong', label: 'Cổng kiểm soát', show: canHse(user, 'gate', 'inspect', 'approve') },
@@ -71,6 +73,7 @@ export default function HsePage() {
           <Route path="khach" element={<VisitorsPage />} />
           <Route path="danh-gia" element={<EvaluationsPage />} />
           <Route path="kiem-tra" element={<InspectionsPage />} />
+          <Route path="phat-hien" element={<FindingsPage />} />
           <Route path="dinh-chi" element={<SuspensionsPage />} />
           <Route path="giay-phep" element={<PermitsPage />} />
           <Route path="cong" element={<GatePage embedded />} />
