@@ -3,6 +3,7 @@ import { query } from '../db.js'
 import { requireAuth } from '../auth.js'
 import { findWorkersByTraineeIdentity } from '../lib/hse-training.js'
 import { audit, clientIp, syncWorkerAccess } from '../lib/hse-core.js'
+import { traineePhotoUpload, isTraineePhotoName } from '../lib/trainee-photo.js'
 
 export const coursesRouter = Router()
 
@@ -30,9 +31,19 @@ coursesRouter.get('/', requireAuth, async (req, res) => {
 // Trường thông tin học viên cần khai báo trước khi làm trắc nghiệm (admin cấu hình)
 coursesRouter.get('/meta/quiz-fields', requireAuth, async (_req, res) => {
   const { rows } = await query(
-    'SELECT field_key, label, type, options, required FROM quiz_fields ORDER BY sort_order, id',
+    'SELECT field_key, label, type, options, required, purpose FROM quiz_fields ORDER BY sort_order, id',
   )
   res.json({ fields: rows })
+})
+
+// Ảnh học viên cho trường loại 'image' (Pha H2). Trả về stored_name; client gửi lại giá
+// trị đó trong traineeInfo[field_key] khi nộp bài. Server kiểm lại tên này trước khi
+// nhúng vào PDF (xem resolveTraineePhoto) — không tin giá trị client gửi lên.
+coursesRouter.post('/:id/trainee-photo', requireAuth, traineePhotoUpload.single('file'), (req, res) => {
+  // multer đã loại file sai định dạng bằng cách bỏ file, nên req.file trống gộp cả hai
+  // lý do: không chọn ảnh, hoặc ảnh sai định dạng.
+  if (!req.file) return res.status(400).json({ error: 'Vui lòng chọn ảnh PNG, JPG hoặc WEBP (tối đa 4MB).' })
+  res.status(201).json({ stored_name: req.file.filename })
 })
 
 // Chi tiết khóa học — KHÔNG trả correct_index để tránh lộ đáp án
@@ -126,10 +137,16 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
   for (const f of fieldRows.rows) {
     const value = String(rawInfo[f.field_key] ?? '').trim().slice(0, 200)
     if (f.required && !value) {
-      return res.status(400).json({ error: `Vui lòng nhập "${f.label}".` })
+      return res.status(400).json({ error: `Vui lòng ${f.type === 'image' ? 'tải lên' : 'nhập'} "${f.label}".` })
     }
     if (f.type === 'select' && value && !f.options.includes(value)) {
       return res.status(400).json({ error: `Giá trị "${f.label}" không hợp lệ.` })
+    }
+    // Trường ảnh chỉ chứa stored_name do endpoint upload sinh ra. Kiểm ngay tại đây để
+    // một giá trị bịa (vd '../../../etc/passwd') bị chặn ở cửa nộp bài, không đi tiếp
+    // vào DB rồi chờ tới lúc dựng PDF mới phát hiện.
+    if (f.type === 'image' && value && !isTraineePhotoName(value)) {
+      return res.status(400).json({ error: `Ảnh "${f.label}" không hợp lệ. Vui lòng tải lại ảnh.` })
     }
     if (value) traineeInfo[f.field_key] = value
   }

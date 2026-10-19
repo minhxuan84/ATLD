@@ -994,6 +994,27 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
     // Cổng đọc hạn hiệu lực và trạng thái phê duyệt ở mọi lần quét.
     await query(`CREATE INDEX IF NOT EXISTS idx_hse_workers_access
       ON atld.hse_workers(access_status, entry_approval_status)`)
+
+    // ── Pha H1: vai trò của trường trắc nghiệm ────────────
+    // Chứng nhận phải lấy họ tên từ FORM (không lấy tên tài khoản đăng nhập) và ảnh từ
+    // trường upload ảnh trong form. Admin tự đặt mã trường ('hovaten', 'ho_ten',
+    // 'full_name'…) nên dò theo tên là sẽ sai lúc nào không biết; đánh dấu tường minh
+    // thì không còn chỗ để đoán, và cũng xử được form có nhiều trường ảnh.
+    await query(`ALTER TABLE atld.quiz_fields ADD COLUMN IF NOT EXISTS
+      purpose VARCHAR(20) NOT NULL DEFAULT 'none'`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.quiz_fields ADD CONSTRAINT quiz_fields_purpose_chk
+          CHECK (purpose IN ('none','full_name','id_number','photo'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    // Nới CHECK của `type` để nhận thêm 'image'. Drop rồi add lại constraint — tập giá
+    // trị chỉ rộng ra nên mọi dòng đang có vẫn hợp lệ.
+    await query(`ALTER TABLE atld.quiz_fields DROP CONSTRAINT IF EXISTS quiz_fields_type_check`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.quiz_fields ADD CONSTRAINT quiz_fields_type_chk
+          CHECK (type IN ('text','select','image'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }

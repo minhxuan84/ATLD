@@ -385,8 +385,56 @@ adminRouter.delete('/branches/:id', requireSection('chi-nhanh'), async (req, res
 })
 
 // ---- Trường thông tin trắc nghiệm (quiz_fields) ----
+
+const FIELD_TYPES = ['text', 'select', 'image'] as const
+/**
+ * Vai trò của trường trong hồ sơ đào tạo (Pha H1):
+ *  - full_name: tên in trên chứng nhận. Lấy từ form, KHÔNG lấy tên tài khoản đăng nhập.
+ *  - photo:     ảnh in bên trái chứng nhận, dấu PASSED đóng chồng lên.
+ *  - id_number: CCCD — dùng để đếm số lần thi của học viên vào bằng QR (không có tài khoản).
+ * Đánh dấu tường minh thay vì dò theo mã trường, vì mã do admin tự đặt.
+ */
+const FIELD_PURPOSES = ['none', 'full_name', 'id_number', 'photo'] as const
+
+/** Vai trò nào chỉ được gắn cho đúng một trường, kèm loại trường bắt buộc đi với nó. */
+const PURPOSE_TYPE: Partial<Record<(typeof FIELD_PURPOSES)[number], (typeof FIELD_TYPES)[number]>> = {
+  photo: 'image',
+}
+
+/** Chuẩn hóa type/purpose từ body và kiểm tính nhất quán giữa hai giá trị. */
+function readTypeAndPurpose(b: Record<string, unknown>) {
+  const type = FIELD_TYPES.includes(b.type as never) ? (b.type as (typeof FIELD_TYPES)[number]) : 'text'
+  const purpose = FIELD_PURPOSES.includes(b.purpose as never)
+    ? (b.purpose as (typeof FIELD_PURPOSES)[number]) : 'none'
+  const options = Array.isArray(b.options)
+    ? (b.options as unknown[]).map((o) => String(o).slice(0, 100)).filter(Boolean) : []
+
+  if (type === 'select' && options.length < 1) return { error: 'Trường lựa chọn cần ít nhất 1 phương án.' }
+  const need = PURPOSE_TYPE[purpose]
+  if (need && type !== need) {
+    return { error: `Vai trò "${purpose}" chỉ gắn được cho trường loại "${need}".` }
+  }
+  // Ngược lại: trường ảnh mà không đánh dấu photo thì ảnh không vào chứng nhận được.
+  // Không chặn (form có thể cần nhiều ảnh), nhưng type ảnh thì options vô nghĩa.
+  return { type, purpose, options: type === 'image' ? [] : options }
+}
+
+/**
+ * Mỗi vai trò (trừ 'none') chỉ được gắn cho một trường — nếu hai trường cùng khai
+ * full_name thì không có cách nào định được tên nào in lên chứng nhận. Chặn ở đây thay
+ * vì âm thầm gỡ vai trò của trường kia, để người cấu hình biết mình đang đổi cái gì.
+ */
+async function purposeTaken(purpose: string, exceptId?: string) {
+  if (purpose === 'none') return null
+  const { rows } = await query<{ label: string }>(
+    `SELECT label FROM quiz_fields WHERE purpose = $1 AND ($2::int IS NULL OR id <> $2::int) LIMIT 1`,
+    [purpose, exceptId ?? null],
+  )
+  return rows[0]?.label ?? null
+}
+
 adminRouter.get('/quiz-fields', requireSection('truong-trac-nghiem'), async (_req, res) => {
-  const { rows } = await query('SELECT id, field_key, label, type, options, required, sort_order FROM quiz_fields ORDER BY sort_order, id')
+  const { rows } = await query('SELECT id, field_key, label, type, options, required, purpose, sort_order FROM quiz_fields ORDER BY sort_order, id')
   res.json({ fields: rows })
 })
 
@@ -396,17 +444,19 @@ adminRouter.post('/quiz-fields', requireSection('truong-trac-nghiem'), async (re
   if (!/^[a-z0-9_]{2,40}$/.test(fieldKey)) return res.status(400).json({ error: 'Mã trường không hợp lệ (chữ thường/số/_, 2-40 ký tự).' })
   const label = String(b.label ?? '').trim().slice(0, 120)
   if (!label) return res.status(400).json({ error: 'Thiếu nhãn hiển thị.' })
-  const type = b.type === 'select' ? 'select' : 'text'
-  const options = Array.isArray(b.options) ? b.options.map((o: unknown) => String(o).slice(0, 100)).filter(Boolean) : []
-  if (type === 'select' && options.length < 1) return res.status(400).json({ error: 'Trường lựa chọn cần ít nhất 1 phương án.' })
+  const parsed = readTypeAndPurpose(b)
+  if ('error' in parsed) return res.status(400).json({ error: parsed.error })
+  const { type, purpose, options } = parsed
 
   const dup = await query('SELECT 1 FROM quiz_fields WHERE field_key=$1', [fieldKey])
   if (dup.rows.length) return res.status(409).json({ error: 'Mã trường đã tồn tại.' })
+  const taken = await purposeTaken(purpose)
+  if (taken) return res.status(409).json({ error: `Vai trò này đã gắn cho trường "${taken}". Gỡ vai trò ở trường đó trước.` })
 
   const order = await query('SELECT coalesce(max(sort_order),0)+1 AS n FROM quiz_fields')
   const { rows } = await query(
-    'INSERT INTO quiz_fields (field_key, label, type, options, required, sort_order) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
-    [fieldKey, label, type, JSON.stringify(options), b.required !== false, order.rows[0].n],
+    'INSERT INTO quiz_fields (field_key, label, type, options, required, purpose, sort_order) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+    [fieldKey, label, type, JSON.stringify(options), b.required !== false, purpose, order.rows[0].n],
   )
   res.status(201).json({ id: rows[0].id })
 })
@@ -415,12 +465,14 @@ adminRouter.put('/quiz-fields/:id', requireSection('truong-trac-nghiem'), async 
   const b = req.body
   const label = String(b.label ?? '').trim().slice(0, 120)
   if (!label) return res.status(400).json({ error: 'Thiếu nhãn hiển thị.' })
-  const type = b.type === 'select' ? 'select' : 'text'
-  const options = Array.isArray(b.options) ? b.options.map((o: unknown) => String(o).slice(0, 100)).filter(Boolean) : []
-  if (type === 'select' && options.length < 1) return res.status(400).json({ error: 'Trường lựa chọn cần ít nhất 1 phương án.' })
+  const parsed = readTypeAndPurpose(b)
+  if ('error' in parsed) return res.status(400).json({ error: parsed.error })
+  const { type, purpose, options } = parsed
+  const taken = await purposeTaken(purpose, req.params.id)
+  if (taken) return res.status(409).json({ error: `Vai trò này đã gắn cho trường "${taken}". Gỡ vai trò ở trường đó trước.` })
   await query(
-    'UPDATE quiz_fields SET label=$1, type=$2, options=$3, required=$4 WHERE id=$5',
-    [label, type, JSON.stringify(options), b.required !== false, req.params.id],
+    'UPDATE quiz_fields SET label=$1, type=$2, options=$3, required=$4, purpose=$5 WHERE id=$6',
+    [label, type, JSON.stringify(options), b.required !== false, purpose, req.params.id],
   )
   res.json({ ok: true })
 })
