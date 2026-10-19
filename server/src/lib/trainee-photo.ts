@@ -21,7 +21,8 @@ export const TRAINEE_DIR = path.join(__dirname, '..', '..', 'uploads', 'trainee'
 fs.mkdirSync(TRAINEE_DIR, { recursive: true })
 
 const ALLOWED_IMG = ['png', 'jpg', 'jpeg', 'webp']
-const ALLOWED_MIME = ['image/png', 'image/jpeg', 'image/webp']
+// image/jpg là MIME không chuẩn nhưng một số trình duyệt Android gửi thay cho image/jpeg.
+const ALLOWED_MIME = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp']
 const MAX_IMG_MB = 4
 
 const storage = multer.diskStorage({
@@ -37,8 +38,11 @@ export const traineePhotoUpload = multer({
   limits: { fileSize: MAX_IMG_MB * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase().slice(1)
+    // cb(null, false): multer bỏ file im lặng → req.file undefined → route handler
+    // trả 400 đúng định dạng JSON. KHÔNG dùng cb(new Error) vì sẽ gọi next(error)
+    // và Express trả 500 HTML thay vì JSON 400.
     if (!ALLOWED_IMG.includes(ext) || !ALLOWED_MIME.includes(file.mimetype)) {
-      return cb(new Error('Chỉ chấp nhận ảnh PNG, JPG hoặc WEBP.'))
+      return cb(null, false)
     }
     cb(null, true)
   },

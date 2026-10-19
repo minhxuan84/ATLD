@@ -9,7 +9,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { ShieldCheck, AlertTriangle, Clock, CheckCircle2, XCircle, DownloadCloud, Upload, ArrowRight } from 'lucide-react'
+import { ShieldCheck, AlertTriangle, Clock, CheckCircle2, XCircle, DownloadCloud, Upload, ArrowRight, Camera } from 'lucide-react'
 import { fmtDateTime } from '../../lib/date'
 import { portalApi } from './portalApi'
 
@@ -62,6 +62,7 @@ export default function QuizPage() {
   const [step, setStep] = useState<'info' | 'quiz' | 'result'>('info')
   const [traineeInfo, setTraineeInfo] = useState<Record<string, string>>({})
   const [photoBusy, setPhotoBusy] = useState<Record<string, boolean>>({})
+  const [previews, setPreviews] = useState<Record<string, string>>({})
   const [answers, setAnswers] = useState<Record<string, number>>({})
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<QuizResult | null>(null)
@@ -105,7 +106,7 @@ export default function QuizPage() {
     // Kiểm trường bắt buộc ở client cho phản hồi nhanh; server kiểm lại.
     for (const f of quiz.fields) {
       if (f.required && !traineeInfo[f.field_key]) {
-        alert(`Vui lòng ${f.type === 'image' ? 'tải lên' : 'nhập'} "${f.label}".`)
+        alert(`Vui lòng ${f.type === 'image' ? 'chụp hoặc tải lên' : 'nhập'} "${f.label}".`)
         return
       }
     }
@@ -216,31 +217,78 @@ export default function QuizPage() {
                     </select>
                   ) : f.type === 'image' ? (
                     <div>
+                      {/* Input chụp ảnh trực tiếp từ camera trước */}
+                      <input
+                        ref={(el) => { fileRefs.current[`${f.field_key}_cam`] = el }}
+                        type="file" accept="image/*" capture="user" className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0]
+                          if (!file) return
+                          setPreviews((p) => ({ ...p, [f.field_key]: URL.createObjectURL(file) }))
+                          uploadPhoto(f, file)
+                          e.target.value = ''
+                        }}
+                      />
+                      {/* Input chọn từ thư viện / bộ nhớ máy */}
                       <input
                         ref={(el) => { fileRefs.current[f.field_key] = el }}
                         type="file" accept="image/*" className="hidden"
                         onChange={(e) => {
                           const file = e.target.files?.[0]
-                          if (file) uploadPhoto(f, file)
+                          if (!file) return
+                          setPreviews((p) => ({ ...p, [f.field_key]: URL.createObjectURL(file) }))
+                          uploadPhoto(f, file)
+                          e.target.value = ''
                         }}
                       />
-                      <button
-                        type="button"
-                        onClick={() => fileRefs.current[f.field_key]?.click()}
-                        disabled={photoBusy[f.field_key]}
-                        className="flex items-center gap-2 border border-dashed border-gray-300 rounded-lg px-4 py-3 text-sm text-gray-600 hover:border-green-500 hover:text-green-700 transition-colors w-full disabled:opacity-50"
-                      >
-                        <Upload className="h-4 w-4 flex-shrink-0" />
-                        {photoBusy[f.field_key]
-                          ? 'Đang tải...'
-                          : traineeInfo[f.field_key]
-                            ? '✓ Đã tải ảnh — nhấn để thay'
-                            : 'Chọn ảnh từ thiết bị'}
-                      </button>
-                      {traineeInfo[f.field_key] && (
-                        <p className="text-xs text-green-700 mt-1">
-                          {traineeInfo[f.field_key]}
-                        </p>
+
+                      {/* Thumbnail xem trước */}
+                      {previews[f.field_key] && (
+                        <div className="mb-3 relative inline-block">
+                          <img
+                            src={previews[f.field_key]}
+                            alt="Hình đại diện"
+                            className="h-28 w-24 object-cover rounded-lg border border-gray-200 shadow-sm"
+                          />
+                          {photoBusy[f.field_key] && (
+                            <div className="absolute inset-0 bg-white/60 flex items-center justify-center rounded-lg">
+                              <div className="animate-spin h-5 w-5 border-2 border-green-600 border-t-transparent rounded-full" />
+                            </div>
+                          )}
+                          {traineeInfo[f.field_key] && !photoBusy[f.field_key] && (
+                            <div className="absolute -top-1.5 -right-1.5 bg-green-500 rounded-full p-0.5">
+                              <CheckCircle2 className="h-3.5 w-3.5 text-white" />
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Nút hành động */}
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => fileRefs.current[`${f.field_key}_cam`]?.click()}
+                          disabled={photoBusy[f.field_key]}
+                          className="flex-1 flex items-center justify-center gap-2 bg-green-600 text-white rounded-lg px-3 py-2.5 text-sm font-medium hover:bg-green-700 active:bg-green-800 transition-colors disabled:opacity-50"
+                        >
+                          <Camera className="h-4 w-4 flex-shrink-0" />
+                          Chụp ảnh
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => fileRefs.current[f.field_key]?.click()}
+                          disabled={photoBusy[f.field_key]}
+                          className="flex-1 flex items-center justify-center gap-2 border border-gray-300 text-gray-700 bg-white rounded-lg px-3 py-2.5 text-sm font-medium hover:border-green-500 hover:text-green-700 active:bg-gray-50 transition-colors disabled:opacity-50"
+                        >
+                          <Upload className="h-4 w-4 flex-shrink-0" />
+                          Tải từ máy
+                        </button>
+                      </div>
+                      {photoBusy[f.field_key] && (
+                        <p className="text-xs text-gray-500 mt-2 text-center">Đang tải ảnh lên...</p>
+                      )}
+                      {!previews[f.field_key] && !photoBusy[f.field_key] && (
+                        <p className="text-xs text-gray-400 mt-1.5 text-center">Chụp hoặc chọn ảnh chân dung rõ mặt</p>
                       )}
                     </div>
                   ) : (
