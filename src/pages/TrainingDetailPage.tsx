@@ -30,6 +30,7 @@ interface QuizField {
   type: 'text' | 'select' | 'image'
   options: string[]
   required: boolean
+  purpose?: 'none' | 'full_name' | 'id_number' | 'photo'
 }
 interface ProgressRow {
   step: number
@@ -45,7 +46,10 @@ export default function TrainingDetailPage() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [step, setStep] = useState(1)
   const [answers, setAnswers] = useState<Record<number, number>>({})
-  const [result, setResult] = useState<{ score: number; passed: boolean; passScore: number; certificate: CertData | null } | null>(null)
+  const [result, setResult] = useState<{
+    score: number; passed: boolean; passScore: number
+    certificate: CertData | null; attempt_pdf?: string | null
+  } | null>(null)
   // Pha E4: 0 = không giới hạn. attemptsLeft null khi khóa học không giới hạn.
   const [maxAttempts, setMaxAttempts] = useState(0)
   const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null)
@@ -240,7 +244,15 @@ export default function TrainingDetailPage() {
             <h2 className="text-lg font-semibold text-slate-800">Bước 3 · Trắc nghiệm trực tuyến</h2>
 
             {showCert ? (
-              <Certificate data={result!.certificate!} />
+              <Certificate
+                data={result!.certificate!}
+                attemptPdfUrl={result!.attempt_pdf}
+                photoUrl={(() => {
+                  // Ảnh lấy từ trường có vai trò 'photo'; không đánh dấu thì lấy trường ảnh đầu tiên.
+                  const pf = quizFields.find((f) => f.purpose === 'photo') ?? quizFields.find((f) => f.type === 'image')
+                  return pf ? previews[pf.field_key] ?? null : null
+                })()}
+              />
             ) : quizFields.length > 0 && !infoConfirmed ? (
               <div className="mt-4">
                 <p className="text-sm text-slate-500">Vui lòng khai báo thông tin trước khi làm bài trắc nghiệm.</p>

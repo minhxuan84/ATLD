@@ -284,7 +284,10 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
   // Tên: chỉ trường purpose='full_name'. Không có trường nào được đánh dấu thì mới
   // rơi về tên tài khoản — đường này chỉ có ở lối vào có đăng nhập, học viên quét QR
   // bắt buộc phải khai (xem portal.ts).
+  // Ảnh: ưu tiên trường purpose='photo'; chưa đánh dấu thì lấy trường ảnh đầu tiên
+  // để admin quên chọn vai trò không làm chứng nhận mất ảnh.
   const photoField = fieldRows.rows.find((f) => f.purpose === 'photo')
+    ?? fieldRows.rows.find((f) => f.type === 'image')
   const photoStoredName = photoField ? (traineeInfo[photoField.field_key] ?? null) : null
   const nameField = fieldRows.rows.find((f) => f.purpose === 'full_name')
   const traineeName = (nameField ? traineeInfo[nameField.field_key] : '') || req.user!.fullName

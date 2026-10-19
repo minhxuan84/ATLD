@@ -539,7 +539,9 @@ portalRouter.post('/:token/quiz', async (req, res) => {
   )
   const attemptId = attemptRes.rows[0]!.id
 
+  // Cùng quy tắc với courses.ts: purpose='photo' trước, không có thì trường ảnh đầu tiên.
   const photoField = fieldRows.rows.find((f) => f.purpose === 'photo')
+    ?? fieldRows.rows.find((f) => f.type === 'image')
   const photoStoredName = photoField ? (traineeInfo[photoField.field_key] ?? null) : null
 
   let downloadKey: string | null = null
