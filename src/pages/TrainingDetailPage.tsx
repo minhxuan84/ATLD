@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { toEmbedUrl } from '../lib/embedUrl'
 import { Card } from '../components/ui'
-import { PlayCircle, FileText, ClipboardCheck, Check, ArrowRight, ArrowLeft, RefreshCw } from 'lucide-react'
+import { PlayCircle, FileText, ClipboardCheck, Check, ArrowRight, ArrowLeft, RefreshCw, Camera, Upload, Loader2 } from 'lucide-react'
 import Certificate, { type CertData } from '../components/Certificate'
 
 const STEPS = [
@@ -27,7 +27,7 @@ interface Question {
 interface QuizField {
   field_key: string
   label: string
-  type: 'text' | 'select'
+  type: 'text' | 'select' | 'image'
   options: string[]
   required: boolean
 }
@@ -56,6 +56,11 @@ export default function TrainingDetailPage() {
   const [infoConfirmed, setInfoConfirmed] = useState(false)
   const [seed, setSeed] = useState('')
   const [questionIds, setQuestionIds] = useState<number[]>([])
+  // Trường ảnh (type='image'): traineeInfo giữ stored_name server trả về, còn previews giữ
+  // blob URL để hiện ảnh ngay trên máy, không phải tải ngược từ server.
+  const [previews, setPreviews] = useState<Record<string, string>>({})
+  const [photoBusy, setPhotoBusy] = useState<Record<string, boolean>>({})
+  const fileRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
   useEffect(() => {
     api<{
@@ -80,6 +85,31 @@ export default function TrainingDetailPage() {
       .then((d) => setQuizFields(d.fields))
       .catch(() => {})
   }, [id])
+
+  const uploadPhoto = async (key: string, file: File) => {
+    setPreviews((p) => ({ ...p, [key]: URL.createObjectURL(file) }))
+    // Xóa giá trị cũ trong lúc tải: ảnh mới chưa lên xong thì chưa được tính là đã khai.
+    setTraineeInfo((t) => ({ ...t, [key]: '' }))
+    setPhotoBusy((b) => ({ ...b, [key]: true }))
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const r = await api<{ stored_name: string }>(
+        `/courses/${id}/trainee-photo`, { method: 'POST', body: form, isForm: true })
+      setTraineeInfo((t) => ({ ...t, [key]: r.stored_name }))
+    } catch (e) {
+      setPreviews((p) => { const n = { ...p }; delete n[key]; return n })
+      alert(e instanceof Error ? e.message : 'Tải ảnh thất bại.')
+    } finally {
+      setPhotoBusy((b) => ({ ...b, [key]: false }))
+    }
+  }
+
+  const onPickPhoto = (key: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // cho phép chọn lại cùng một file
+    if (file) uploadPhoto(key, file)
+  }
 
   const goStep = (n: number) => {
     setStep(n)
@@ -223,7 +253,54 @@ export default function TrainingDetailPage() {
                       <label className="block text-sm font-medium text-slate-700">
                         {f.label} {f.required && <span className="text-eco-600">*</span>}
                       </label>
-                      {f.type === 'select' ? (
+                      {f.type === 'image' ? (
+                        <div className="mt-1">
+                          {/* capture="user": điện thoại mở thẳng camera trước; máy tính thì bỏ qua và mở hộp chọn file. */}
+                          <input
+                            ref={(el) => { fileRefs.current[`${f.field_key}_cam`] = el }}
+                            type="file" accept="image/*" capture="user" className="hidden"
+                            onChange={onPickPhoto(f.field_key)}
+                          />
+                          <input
+                            ref={(el) => { fileRefs.current[f.field_key] = el }}
+                            type="file" accept="image/*" className="hidden"
+                            onChange={onPickPhoto(f.field_key)}
+                          />
+                          <div className="flex items-center gap-3">
+                            {previews[f.field_key] && (
+                              <div className="relative shrink-0">
+                                <img src={previews[f.field_key]} alt={`Ảnh ${f.label}`}
+                                  className="h-24 w-20 rounded-lg border border-slate-200 object-cover" />
+                                {photoBusy[f.field_key] && (
+                                  <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-white/60">
+                                    <Loader2 className="h-5 w-5 animate-spin text-vicem-600" aria-label="Đang tải ảnh" />
+                                  </div>
+                                )}
+                                {traineeInfo[f.field_key] && !photoBusy[f.field_key] && (
+                                  <span className="absolute -right-1.5 -top-1.5 rounded-full bg-emerald-500 p-0.5">
+                                    <Check className="h-3 w-3 text-white" aria-label="Đã tải lên" />
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            <div className="flex flex-1 flex-wrap gap-2">
+                              <button type="button" disabled={photoBusy[f.field_key]}
+                                onClick={() => fileRefs.current[`${f.field_key}_cam`]?.click()}
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-vicem-600 px-3 py-2 text-sm font-medium text-white hover:bg-vicem-700 disabled:opacity-50">
+                                <Camera className="h-4 w-4" /> Chụp ảnh
+                              </button>
+                              <button type="button" disabled={photoBusy[f.field_key]}
+                                onClick={() => fileRefs.current[f.field_key]?.click()}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                                <Upload className="h-4 w-4" /> Tải từ máy
+                              </button>
+                            </div>
+                          </div>
+                          {!previews[f.field_key] && (
+                            <p className="mt-1 text-xs text-slate-400">Ảnh chân dung rõ mặt, PNG/JPG/WEBP, tối đa 4MB.</p>
+                          )}
+                        </div>
+                      ) : f.type === 'select' ? (
                         <select
                           value={traineeInfo[f.field_key] ?? ''}
                           onChange={(e) => setTraineeInfo((t) => ({ ...t, [f.field_key]: e.target.value }))}
@@ -263,7 +340,14 @@ export default function TrainingDetailPage() {
                 {quizFields.length > 0 && (
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-vicem-50 px-4 py-2.5 text-sm text-vicem-800">
                     {quizFields.map((f) => traineeInfo[f.field_key] && (
-                      <span key={f.field_key}><span className="text-vicem-500">{f.label}:</span> <b>{traineeInfo[f.field_key]}</b></span>
+                      f.type === 'image' ? (
+                        previews[f.field_key] && (
+                          <img key={f.field_key} src={previews[f.field_key]} alt={f.label}
+                            className="h-10 w-8 rounded object-cover" />
+                        )
+                      ) : (
+                        <span key={f.field_key}><span className="text-vicem-500">{f.label}:</span> <b>{traineeInfo[f.field_key]}</b></span>
+                      )
                     ))}
                     <button onClick={() => setInfoConfirmed(false)} className="ml-auto text-xs font-medium text-vicem-600 underline">Sửa thông tin</button>
                   </div>

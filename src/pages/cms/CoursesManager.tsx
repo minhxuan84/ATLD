@@ -475,6 +475,16 @@ export default function CoursesManager() {
                   {c.max_attempts > 0 && ` · tối đa ${c.max_attempts} lần thi`}
                 </p>
               </div>
+              {/* Lối tắt tới khối "Link QR thi" — khối đó nằm trong phần mở rộng nên dễ bị bỏ sót. */}
+              <button
+                onClick={async () => {
+                  if (expanded !== c.id) await toggle(c.id)
+                  document.getElementById(`qr-${c.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                }}
+                className="inline-flex items-center gap-1 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-700 hover:bg-sky-100"
+              >
+                <QrCode className="h-3.5 w-3.5" /> QR thi
+              </button>
               <button onClick={() => startEditCourse(c)} className="rounded p-1.5 text-slate-400 hover:bg-vicem-50 hover:text-vicem-600" aria-label={`Sửa khóa học ${c.title}`}><Pencil className="h-4 w-4" /></button>
               <button onClick={() => deleteCourse(c.id)} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label="Xóa khóa học"><Trash2 className="h-4 w-4" /></button>
             </div>
@@ -543,7 +553,7 @@ export default function CoursesManager() {
                 </div>
 
                 {/* ─ Link QR thi tại hiện trường (Pha H6) ─ */}
-                <div className="mt-5">
+                <div id={`qr-${c.id}`} className="mt-5 scroll-mt-4">
                   <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
                     <QrCode className="h-4 w-4 text-sky-600" /> Link QR thi tại hiện trường
                     <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
