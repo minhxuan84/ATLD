@@ -244,3 +244,209 @@ export function bufferToStream(buffer: Buffer): Readable {
   stream.push(null)
   return stream
 }
+
+// ── Pha H4: PDF bài làm chi tiết và chứng nhận ────────────────────────────
+
+export interface AttemptPdfQuestion {
+  text: string
+  options: string[]
+  correctIndex: number
+  userAnswer: number | null
+}
+
+export interface AttemptPdfData {
+  attemptId: number
+  courseTitle: string
+  traineeInfo: Record<string, string>
+  score: number
+  passed: boolean
+  passScore: number
+  submittedAt: string  // ISO
+  questions: AttemptPdfQuestion[]
+}
+
+/**
+ * Bài làm chi tiết: thông tin học viên, điểm, từng câu kèm đáp án chọn + đáp án đúng.
+ * Dùng chung FR/FB/t() từ buildPermitPdf cho tiếng Việt. Cũng lưu vào uploads/certs/.
+ */
+export function buildAttemptPdf(data: AttemptPdfData): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 55 })
+    const chunks: Buffer[] = []
+    doc.on('data', (c: Buffer) => chunks.push(c))
+    doc.on('end', () => resolve(Buffer.concat(chunks)))
+    doc.on('error', reject)
+
+    const vn = resolveVnFont()
+    let FR = 'Helvetica'
+    let FB = 'Helvetica-Bold'
+    if (vn) {
+      try {
+        doc.registerFont('VN', vn.regular)
+        doc.registerFont('VN-Bold', vn.bold)
+        FR = 'VN'
+        FB = 'VN-Bold'
+      } catch {
+        vnFontCache = null
+      }
+    }
+    const hasVn = FR !== 'Helvetica'
+    const t = (s: string): string => (hasVn ? s : stripTones(s))
+
+    doc.fontSize(14).font(FB).text(t('BÀI LÀM CHI TIẾT'), { align: 'center' })
+    doc.fontSize(11).font(FR).text(t(data.courseTitle), { align: 'center' })
+    doc.moveDown()
+
+    // Thông tin học viên
+    doc.fontSize(10).font(FB).text(t('Thông tin học viên:'))
+    doc.font(FR)
+    for (const [k, v] of Object.entries(data.traineeInfo)) {
+      if (!v || k.startsWith('_')) continue
+      doc.text(t(`  ${k}: ${v}`), { indent: 10 })
+    }
+    doc.moveDown()
+
+    // Kết quả
+    doc.font(FB).text(t('Kết quả:'))
+    doc.font(FR)
+      .text(t(`  Điểm: ${data.score}/${100} (đạt từ ${data.passScore})`))
+      .text(t(`  Kết luận: ${data.passed ? 'ĐẠT' : 'CHƯA ĐẠT'}`))
+      .text(t(`  Nộp bài lúc: ${dt(data.submittedAt)}`))
+    doc.moveDown()
+
+    // Từng câu hỏi
+    doc.font(FB).text(t(`Chi tiết ${data.questions.length} câu:`))
+    doc.moveDown(0.3)
+
+    data.questions.forEach((q, i) => {
+      doc.fontSize(10).font(FB).text(t(`Câu ${i + 1}: ${q.text}`))
+      doc.fontSize(9).font(FR)
+      q.options.forEach((opt, j) => {
+        const userPick = q.userAnswer === j
+        const isCorrect = j === q.correctIndex
+        const mark = userPick && isCorrect ? '✓ '
+          : userPick ? '✗ '
+          : isCorrect ? '→ '
+          : '  '
+        const color = userPick && isCorrect ? 'green'
+          : userPick ? 'red'
+          : isCorrect ? 'blue'
+          : 'black'
+        doc.fillColor(color).text(t(`${mark}${String.fromCharCode(65 + j)}. ${opt}`), { indent: 15 })
+      })
+      doc.fillColor('black').moveDown(0.5)
+      // Page break sau mỗi 3 câu nếu gần hết trang
+      if ((i + 1) % 3 === 0 && doc.y > 700) doc.addPage()
+    })
+
+    doc.fontSize(8).fillColor('grey')
+      .text(t(`Mã bài làm: ATTEMPT-${data.attemptId} | Xuất ngày ${d(new Date().toISOString())}`),
+        { align: 'right' })
+
+    doc.end()
+  })
+}
+
+export interface CertificatePdfData {
+  certId: string
+  courseTitle: string
+  traineeName: string
+  score: number
+  issuedAt: string      // ISO
+  expiresAt: string | null  // YYYY-MM-DD
+  photoPath: string | null  // Đường dẫn thật đã kiểm qua resolveTraineePhoto
+}
+
+/**
+ * Chứng nhận đạt: ảnh học viên bên trái (fit 100×120), dấu PASSED đóng chồng lên ảnh,
+ * tên lấy từ trường purpose='full_name'. Không có ảnh thì chừa chỗ và vẫn ra chứng nhận
+ * — thiếu ảnh không được làm người đạt bài mất chứng nhận.
+ */
+export function buildCertificatePdf(data: CertificatePdfData): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 50, layout: 'landscape' })
+    const chunks: Buffer[] = []
+    doc.on('data', (c: Buffer) => chunks.push(c))
+    doc.on('end', () => resolve(Buffer.concat(chunks)))
+    doc.on('error', reject)
+
+    const vn = resolveVnFont()
+    let FR = 'Helvetica'
+    let FB = 'Helvetica-Bold'
+    if (vn) {
+      try {
+        doc.registerFont('VN', vn.regular)
+        doc.registerFont('VN-Bold', vn.bold)
+        FR = 'VN'
+        FB = 'VN-Bold'
+      } catch {
+        vnFontCache = null
+      }
+    }
+    const hasVn = FR !== 'Helvetica'
+    const t = (s: string): string => (hasVn ? s : stripTones(s))
+
+    // ── Khung ảnh bên trái (100×120) và dấu PASSED chồng lên ──
+    const photoBox = { x: 60, y: 80, w: 100, h: 120 }
+    if (data.photoPath) {
+      try {
+        doc.image(data.photoPath, photoBox.x, photoBox.y, { fit: [photoBox.w, photoBox.h] })
+      } catch {
+        // Không đọc được ảnh: vẽ khung rỗng, không block chứng nhận.
+        doc.rect(photoBox.x, photoBox.y, photoBox.w, photoBox.h).stroke()
+      }
+    } else {
+      // Không có ảnh: vẽ khung trống
+      doc.rect(photoBox.x, photoBox.y, photoBox.w, photoBox.h).stroke()
+    }
+
+    // Dấu PASSED đóng chồng lên ảnh: khung xoay 15° + chữ đậm
+    doc.save()
+    doc.translate(photoBox.x + photoBox.w / 2, photoBox.y + photoBox.h / 2)
+    doc.rotate(-15, { origin: [0, 0] })
+    doc.roundedRect(-40, -12, 80, 24, 4).lineWidth(2).strokeColor('#E2231A').stroke()
+    doc.fontSize(14).font(FB).fillColor('#E2231A').text('PASSED', -40, -7, {
+      width: 80, align: 'center',
+    })
+    doc.restore()
+
+    // ── Nội dung chứng nhận bên phải ảnh ──
+    const contentX = 190
+    doc.fontSize(20).font(FB).fillColor('black')
+      .text(t('CHỨNG NHẬN HOÀN THÀNH'), contentX, 80, { width: 550, align: 'center' })
+    doc.fontSize(12).font(FR)
+      .text(t(data.courseTitle), contentX, 110, { width: 550, align: 'center' })
+    doc.moveDown(1.5)
+
+    doc.fontSize(11).font(FR).text(t('Chứng nhận rằng'), contentX, doc.y, { width: 550, align: 'center' })
+    doc.fontSize(16).font(FB)
+      .text(t(data.traineeName), contentX, doc.y + 10, { width: 550, align: 'center' })
+    doc.fontSize(10).font(FR).moveDown(1)
+      .text(t('đã hoàn thành chương trình huấn luyện với kết quả:'), contentX, doc.y, {
+        width: 550, align: 'center',
+      })
+    doc.fontSize(12).font(FB).moveDown(0.5)
+      .text(t(`Điểm: ${data.score}/100 — ĐẠT`), contentX, doc.y, { width: 550, align: 'center' })
+
+    doc.fontSize(9).font(FR).moveDown(1.5)
+    const issued = d(data.issuedAt)
+    const expires = data.expiresAt ? d(new Date(data.expiresAt).toISOString()) : null
+    doc.text(t(`Ngày cấp: ${issued}`), contentX, doc.y, { width: 550, align: 'center' })
+    if (expires) {
+      doc.text(t(`Hiệu lực đến: ${expires}`), contentX, doc.y, { width: 550, align: 'center' })
+    }
+
+    doc.moveDown(3)
+    doc.fontSize(10).font(FB).text(t('NGƯỜI PHỤ TRÁCH'), contentX + 350, doc.y, {
+      width: 200, align: 'center',
+    })
+    doc.fontSize(8).font(FR).fillColor('grey').moveDown(0.3)
+      .text(t('(ký, ghi rõ họ tên)'), contentX + 350, doc.y, { width: 200, align: 'center' })
+
+    doc.fillColor('grey').fontSize(7)
+      .text(t(`Mã chứng nhận: ${data.certId}`), 50, 550, { align: 'right' })
+
+    doc.end()
+  })
+}
+
