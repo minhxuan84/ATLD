@@ -54,15 +54,22 @@ export default function TrainingDetailPage() {
   const [quizFields, setQuizFields] = useState<QuizField[]>([])
   const [traineeInfo, setTraineeInfo] = useState<Record<string, string>>({})
   const [infoConfirmed, setInfoConfirmed] = useState(false)
+  const [seed, setSeed] = useState('')
+  const [questionIds, setQuestionIds] = useState<number[]>([])
 
   useEffect(() => {
     api<{
       course: Course; questions: Question[]; progress: ProgressRow | null
       max_attempts: number; attempts_left: number | null
+      questionIds: number[]; seed: string
     }>(`/courses/${id}`)
       .then((d) => {
         setCourse(d.course)
         setQuestions(d.questions)
+        // seed + questionIds phải gửi trả lại khi nộp: seed để server dựng lại đúng
+        // phép xáo phương án, questionIds để chỉ chấm đúng bộ câu đã phát.
+        setSeed(d.seed ?? '')
+        setQuestionIds(d.questionIds ?? [])
         setStep(d.progress?.step ?? 1)
         setMaxAttempts(d.max_attempts ?? 0)
         setAttemptsLeft(d.attempts_left ?? null)
@@ -83,7 +90,8 @@ export default function TrainingDetailPage() {
     setError('')
     try {
       const r = await api<NonNullable<typeof result> & { attempts_left: number | null }>(
-        `/courses/${id}/submit`, { method: 'POST', body: { answers, traineeInfo } })
+        `/courses/${id}/submit`,
+        { method: 'POST', body: { answers, traineeInfo, seed, questionIds } })
       setResult(r)
       setAttemptsLeft(r.attempts_left ?? null)
     } catch (e) {

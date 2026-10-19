@@ -6,6 +6,7 @@ import { audit, clientIp, syncWorkerAccess } from '../lib/hse-core.js'
 import { traineePhotoUpload, isTraineePhotoName } from '../lib/trainee-photo.js'
 import { generateQuizPdfs } from '../lib/quiz-record.js'
 import { resolveCertPdf } from '../lib/cert-store.js'
+import { issueQuiz, gradeQuiz } from '../lib/quiz-grade.js'
 import crypto from 'node:crypto'
 
 export const coursesRouter = Router()
@@ -75,23 +76,17 @@ coursesRouter.get('/:id', requireAuth, async (req, res) => {
     [req.params.id],
   )
 
-  // Nếu questions_per_attempt > 0 thì rút ngẫu nhiên, ngược lại trả hết
-  const questionsPerAttempt = course.questions_per_attempt || 0
-  let selectedQuestions = allQuestions.rows
-
-  if (questionsPerAttempt > 0 && allQuestions.rows.length > questionsPerAttempt) {
-    // Rút ngẫu nhiên N câu
-    const shuffled = [...allQuestions.rows].sort(() => Math.random() - 0.5)
-    selectedQuestions = shuffled.slice(0, questionsPerAttempt)
-  }
-
-  // Nếu randomize_options = true thì xáo trộn thứ tự options (chỉ UI, correct_index không trả về)
-  if (course.randomize_options) {
-    selectedQuestions = selectedQuestions.map((q) => ({
-      ...q,
-      options: [...q.options].sort(() => Math.random() - 0.5),
-    }))
-  }
+  // Rút đề + xáo phương án qua issueQuiz: dùng chung với portal.ts (đường QR) để hai
+  // lối vào không trôi lệch cách phát đề. `seed` phải gửi kèm và client gửi trả lại
+  // khi nộp — xem ghi chú trong quiz-grade.ts về việc chấm đúng khi xáo phương án.
+  const issued = issueQuiz(
+    {
+      questions_per_attempt: course.questions_per_attempt,
+      randomize_options: course.randomize_options,
+      pass_score: course.pass_score,
+    },
+    allQuestions.rows,
+  )
 
   const progress = await query(
     `SELECT step, quiz_score, passed, cert_id, completed_at, expires_at
@@ -101,8 +96,9 @@ coursesRouter.get('/:id', requireAuth, async (req, res) => {
 
   res.json({
     course,
-    questions: selectedQuestions,
-    questionIds: selectedQuestions.map((q) => q.id), // Để client gửi lại khi submit
+    questions: issued.questions,
+    questionIds: issued.questionIds, // Để client gửi lại khi submit
+    seed: issued.seed,               // Client gửi lại khi nộp để chấm đúng phép xáo
     progress: progress.rows[0] ?? null,
     attempts_used: attemptsUsed,
     max_attempts: maxAttempts,
@@ -153,10 +149,15 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     }
     if (value) traineeInfo[f.field_key] = value
   }
+  // randomize_options PHẢI đọc ở đây: trước Pha H6 endpoint này không đọc cột đó, nên
+  // nó xáo phương án lúc phát đề mà lúc chấm hoàn toàn không biết đã xáo — đó chính là
+  // chỗ bài bị chấm sai (xem ghi chú trong quiz-grade.ts).
   const courseRes = await query<{
     pass_score: number; title: string; validity_months: number | null; max_attempts: number
+    randomize_options: boolean
   }>(
-    'SELECT pass_score, title, validity_months, max_attempts FROM courses WHERE id = $1',
+    `SELECT pass_score, title, validity_months, max_attempts, randomize_options
+     FROM courses WHERE id = $1`,
     [courseId],
   )
   const course = courseRes.rows[0]
@@ -182,23 +183,31 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     })
   }
 
-  // Nếu có questionIds (đề ngẫu nhiên) thì chỉ chấm bộ đó, ngược lại chấm toàn bộ
-  const qres = await query<{ id: number; correct_index: number }>(
+  // Nếu có questionIds (đề ngẫu nhiên) thì chỉ chấm bộ đó, ngược lại chấm toàn bộ.
+  // Lấy cả options để biết số phương án — gradeQuiz cần nó để dựng lại phép xáo và để
+  // loại chỉ số nằm ngoài khoảng.
+  const qres = await query<{ id: number; correct_index: number; options: string[] }>(
     questionIds && questionIds.length > 0
-      ? `SELECT id, correct_index FROM questions WHERE course_id = $1 AND id = ANY($2::int[])`
-      : 'SELECT id, correct_index FROM questions WHERE course_id = $1',
+      ? `SELECT id, correct_index, options FROM questions WHERE course_id = $1 AND id = ANY($2::int[])`
+      : 'SELECT id, correct_index, options FROM questions WHERE course_id = $1',
     questionIds && questionIds.length > 0 ? [courseId, questionIds] : [courseId],
   )
   const total = qres.rows.length
   if (total === 0) return res.status(400).json({ error: 'Khóa học chưa có câu hỏi.' })
 
-  const correct = qres.rows.reduce(
-    (acc, q) => acc + (Number(answers[String(q.id)]) === q.correct_index ? 1 : 0),
-    0,
-  )
-  const score = Math.round((correct / total) * 100)
-  const passScore = Math.max(0, Math.min(100, course.pass_score)) // Clamp 0–100
-  const passed = score >= passScore
+  // Chấm qua gradeQuiz (dùng chung với đường QR). `seed` do client gửi lại từ lúc nhận
+  // đề; thiếu seed thì coi như không xáo — bài làm đang mở trong trình duyệt lúc deploy
+  // vẫn chấm được, chỉ là theo thứ tự gốc.
+  const graded = gradeQuiz({
+    randomizeOptions: Boolean(course.randomize_options),
+    passScore: course.pass_score,
+    seed: typeof req.body?.seed === 'string' ? req.body.seed : null,
+    answers,
+    questions: qres.rows.map((q) => ({
+      id: q.id, correct_index: q.correct_index, option_count: q.options.length,
+    })),
+  })
+  const { score, passScore, passed } = graded
   const certId = passed ? `ATLD-${courseId.toUpperCase()}-${Date.now().toString().slice(-6)}` : null
 
   // Tính expires_at nếu passed và có validity_months
@@ -225,7 +234,10 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     `INSERT INTO atld.quiz_attempts (user_id, course_id, question_ids, answers, score, passed,
       trainee_info, trainee_key, download_key, submitted_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now()) RETURNING id`,
-    [req.user!.id, courseId, JSON.stringify(questionIds || []), JSON.stringify(answers),
+    // Lưu normalizedAnswers (chỉ số GỐC), KHÔNG lưu chỉ số hiển thị: thứ tự hiển thị
+    // chỉ sống trong một lần thi, lưu nó thì PDF bài làm và mọi lần xem lại đều sai.
+    [req.user!.id, courseId, JSON.stringify(questionIds || []),
+     JSON.stringify(graded.normalizedAnswers),
      score, passed, JSON.stringify(traineeInfo), traineeKey, attemptKey],
   )
   const attemptId = attemptRes.rows[0].id
@@ -315,7 +327,9 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     photoStoredName,
     score, passed, passScore, expiresAt,
     questionIds: questionIds ?? [],
-    answers,
+    // Chỉ số GỐC: PDF bài làm in options theo thứ tự trong DB, nên đáp án đã chọn
+    // cũng phải là chỉ số trong thứ tự đó.
+    answers: graded.normalizedAnswers,
   })
 
   res.json({
