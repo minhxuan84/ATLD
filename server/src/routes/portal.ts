@@ -20,6 +20,10 @@ import rateLimit from 'express-rate-limit'
 import { query } from '../db.js'
 import { clientIp, upload, UPLOAD_DIR } from '../lib/hse-core.js'
 import { escapeText, sanitizeFileName, ALLOWED_EXT } from '../util.js'
+import { issueQuiz, gradeQuiz } from '../lib/quiz-grade.js'
+import { generateQuizPdfs, validateTraineeInfo } from '../lib/quiz-record.js'
+import type { QuizFieldRow } from '../lib/quiz-record.js'
+import { traineePhotoUpload } from '../lib/trainee-photo.js'
 
 export const portalRouter = Router()
 
@@ -52,6 +56,8 @@ interface TokenRow {
   contract_id: number | null
   finding_id: number | null
   site_id: number | null
+  /** Chỉ có với purpose='quiz' — CHECK trong DB bảo đảm không null khi là link thi. */
+  course_id: string | null
   expires_at: string
   max_uses: number | null
   used_count: number
@@ -83,7 +89,7 @@ async function loadToken(
   if (!raw || raw.length > 128 || !/^[A-Za-z0-9_-]+$/.test(raw)) return null
   const r = await query<TokenRow>(
     `SELECT t.id, t.purpose, t.label, t.contractor_id, t.contract_id, t.finding_id,
-            t.site_id, t.expires_at, t.max_uses, t.used_count,
+            t.site_id, t.course_id, t.expires_at, t.max_uses, t.used_count,
             ct.name AS contractor_name, c.contract_no, b.name AS site_name
      FROM atld.hse_portal_tokens t
      LEFT JOIN atld.hse_contractors ct ON ct.id = t.contractor_id
@@ -136,6 +142,12 @@ portalRouter.get('/:token', async (req, res) => {
        FROM atld.hse_findings WHERE id = $1`, [t.finding_id])
     finding = f.rows[0] ?? null
   }
+  // ── Pha H6: link thi tại hiện trường ──
+  // Phát đề ngay trong lần GET này, KHÔNG consume: học viên mở link xem rồi đóng lại
+  // không được tính một lượt. Một lượt chỉ bị trừ lúc nộp bài.
+  let quiz: unknown = null
+  if (t.purpose === 'quiz' && t.course_id) quiz = await issueQuizForToken(t.course_id)
+
   res.json({
     purpose: t.purpose,
     label: t.label,
@@ -146,8 +158,63 @@ portalRouter.get('/:token', async (req, res) => {
     remaining_uses: t.max_uses === null ? null : t.max_uses - t.used_count,
     docTypes,
     finding,
+    quiz,
   })
 })
+
+/**
+ * Đề thi cho một link QR: thông tin khóa, trường cần khai và câu hỏi đã rút/xáo.
+ *
+ * KHÔNG trả `correct_index` — client chỉ nhận text và options. `seed` trả về để client
+ * gửi lại khi nộp; nhờ đó server dựng lại đúng phép xáo lúc chấm mà không cần lưu
+ * trạng thái nào giữa GET và POST (xem quiz-grade.ts).
+ */
+async function issueQuizForToken(courseId: string) {
+  const c = await query<{
+    id: string; title: string; description: string | null; video_url: string | null
+    duration: string | null; summary: string | null; pass_score: number
+    questions_per_attempt: number | null; randomize_options: boolean
+    validity_months: number | null; max_attempts: number
+  }>(
+    `SELECT id, title, description, video_url, duration, summary, pass_score,
+            questions_per_attempt, randomize_options, validity_months, max_attempts
+     FROM courses WHERE id = $1`,
+    [courseId],
+  )
+  const course = c.rows[0]
+  if (!course) return null
+
+  const all = await query<{ id: number; text: string; options: string[] }>(
+    'SELECT id, text, options FROM questions WHERE course_id = $1 ORDER BY sort_order, id',
+    [courseId],
+  )
+  if (all.rows.length === 0) return null
+
+  const issued = issueQuiz(
+    {
+      questions_per_attempt: course.questions_per_attempt,
+      randomize_options: course.randomize_options,
+      pass_score: course.pass_score,
+    },
+    all.rows,
+  )
+
+  const fields = await query(
+    'SELECT field_key, label, type, options, required, purpose FROM quiz_fields ORDER BY sort_order, id',
+  )
+
+  return {
+    course: {
+      id: course.id, title: course.title, description: course.description,
+      video_url: course.video_url, duration: course.duration, summary: course.summary,
+      pass_score: course.pass_score, max_attempts: course.max_attempts,
+    },
+    fields: fields.rows,
+    questions: issued.questions,
+    questionIds: issued.questionIds,
+    seed: issued.seed,
+  }
+}
 
 // ═══════════════ Khai báo NLĐ → hàng chờ ═══════════════
 portalRouter.post('/:token/worker', async (req, res) => {
@@ -346,5 +413,171 @@ portalRouter.post('/:token/capa', async (req, res) => {
   res.json({
     ok: true, finding_id: t.finding_id,
     message: 'Đã nhận phản hồi khắc phục. Cán bộ ATVSLĐ sẽ xác minh tại hiện trường.',
+  })
+})
+
+// ═══════════════ Pha H6: thi qua link QR ═══════════════
+// Ảnh học viên. ignoreUses vì endpoint này chạy TRƯỚC khi nộp bài: nếu kiểm max_uses
+// thì link max_uses=1 upload ảnh xong là hết lượt, không nộp được bài nữa.
+portalRouter.post('/:token/quiz/photo', traineePhotoUpload.single('file'), async (req, res) => {
+  const t = await loadToken(String(req.params.token), 'quiz', { ignoreUses: true })
+  if (!t) return res.status(403).json({ error: BAD_TOKEN })
+  if (!req.file)
+    return res.status(400).json({ error: 'Vui lòng chọn ảnh PNG, JPG hoặc WEBP (tối đa 4MB).' })
+  res.status(201).json({ stored_name: req.file.filename })
+})
+
+portalRouter.post('/:token/quiz', async (req, res) => {
+  const t = await loadToken(String(req.params.token), 'quiz')
+  if (!t || !t.course_id) return res.status(403).json({ error: BAD_TOKEN })
+  const courseId = t.course_id
+
+  const answers = req.body?.answers as Record<string, number> | undefined
+  if (!answers || typeof answers !== 'object')
+    return res.status(400).json({ error: 'Thiếu bài làm.' })
+  const questionIds = Array.isArray(req.body?.questionIds)
+    ? (req.body.questionIds as unknown[]).map(Number).filter(Number.isInteger)
+    : []
+
+  const courseRes = await query<{
+    pass_score: number; title: string; validity_months: number | null
+    max_attempts: number; randomize_options: boolean
+  }>(
+    `SELECT pass_score, title, validity_months, max_attempts, randomize_options
+     FROM courses WHERE id = $1`,
+    [courseId],
+  )
+  const course = courseRes.rows[0]
+  if (!course) return res.status(403).json({ error: BAD_TOKEN })
+
+  const fieldRows = await query<QuizFieldRow>(
+    'SELECT field_key, label, type, options, required, purpose FROM quiz_fields ORDER BY sort_order, id',
+  )
+  const checked = validateTraineeInfo(
+    fieldRows.rows, (req.body?.traineeInfo ?? {}) as Record<string, unknown>)
+  if ('error' in checked) return res.status(400).json({ error: checked.error })
+  const traineeInfo = checked.info
+
+  // Tên trên chứng nhận PHẢI khai: đường này không có tài khoản nên không có gì rơi về
+  // như courses.ts (req.user.fullName). Thiếu dấu purpose='full_name' trong cấu hình
+  // quiz_fields là lỗi cấu hình, báo rõ cho người đào tạo sửa chứ không cấp chứng nhận
+  // không tên.
+  const nameField = fieldRows.rows.find((f) => f.purpose === 'full_name')
+  const traineeName = nameField ? (traineeInfo[nameField.field_key] ?? '') : ''
+  if (!traineeName)
+    return res.status(400).json({
+      error: 'Biểu mẫu chưa có trường họ tên (vai trò "Họ và tên") nên chưa cấp được '
+        + 'chứng nhận. Liên hệ cán bộ đào tạo.',
+    })
+
+  // ── Giới hạn số lần thi ──
+  // Đếm theo trainee_key (CCCD đã băm) để mỗi học viên có hạn riêng dù dùng chung link.
+  // Hệ quả cần biết: KHÔNG có trường purpose='id_number' thì trainee_key null, không
+  // đếm theo người được nữa — giới hạn rơi về max_uses của token, tức là đếm theo link.
+  const idField = fieldRows.rows.find((f) => f.purpose === 'id_number')
+  const idNumber = idField ? traineeInfo[idField.field_key] : null
+  const traineeKey = idNumber
+    ? crypto.createHash('sha256').update(idNumber.trim().toLowerCase(), 'utf8').digest('hex')
+    : null
+  const maxAttempts = Number(course.max_attempts ?? 0)
+  let used = 0
+  if (traineeKey && maxAttempts > 0) {
+    const r = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM atld.quiz_attempts
+       WHERE trainee_key = $1 AND course_id = $2 AND submitted_at IS NOT NULL`,
+      [traineeKey, courseId],
+    )
+    used = Number(r.rows[0]?.n ?? 0)
+    // Chặn TRƯỚC khi chấm: chấm rồi mới chặn thì vẫn lộ kết quả và vẫn ghi attempt.
+    if (used >= maxAttempts)
+      return res.status(403).json({
+        error: `Đã hết số lần làm bài cho phép (${maxAttempts} lần). `
+          + 'Liên hệ cán bộ đào tạo để được xem xét.',
+        attempts_used: used, max_attempts: maxAttempts,
+      })
+  }
+
+  const qres = await query<{ id: number; correct_index: number; options: string[] }>(
+    questionIds.length > 0
+      ? 'SELECT id, correct_index, options FROM questions WHERE course_id = $1 AND id = ANY($2::int[])'
+      : 'SELECT id, correct_index, options FROM questions WHERE course_id = $1',
+    questionIds.length > 0 ? [courseId, questionIds] : [courseId],
+  )
+  if (qres.rows.length === 0) return res.status(400).json({ error: 'Khóa học chưa có câu hỏi.' })
+
+  // Trừ lượt dùng của link NGAY TRƯỚC khi ghi bài: trừ sau thì hai request song song
+  // cùng vượt được max_uses.
+  if (!(await consume(t.id))) return res.status(403).json({ error: BAD_TOKEN })
+
+  const graded = gradeQuiz({
+    randomizeOptions: Boolean(course.randomize_options),
+    passScore: course.pass_score,
+    seed: typeof req.body?.seed === 'string' ? req.body.seed : null,
+    answers,
+    questions: qres.rows.map((q) => ({
+      id: q.id, correct_index: q.correct_index, option_count: q.options.length,
+    })),
+  })
+  const { score, passScore, passed } = graded
+  const certId = passed
+    ? `ATLD-${courseId.toUpperCase()}-${Date.now().toString().slice(-6)}` : null
+  const expiresAt = passed && course.validity_months
+    ? new Date(Date.now() + course.validity_months * 30.44 * 24 * 60 * 60 * 1000)
+        .toISOString().slice(0, 10)
+    : null
+
+  // user_id null, portal_token_id có giá trị — CHECK quiz_attempts_owner_chk thỏa.
+  // KHÔNG ghi `progress`: bảng đó UNIQUE (user_id, course_id) và NOT NULL user_id.
+  const attemptKey = crypto.randomBytes(32).toString('hex')
+  const attemptRes = await query<{ id: number }>(
+    `INSERT INTO atld.quiz_attempts (user_id, portal_token_id, course_id, question_ids,
+       answers, score, passed, trainee_info, trainee_key, download_key, submitted_at)
+     VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, now()) RETURNING id`,
+    [t.id, courseId, JSON.stringify(questionIds),
+     JSON.stringify(graded.normalizedAnswers),
+     score, passed, JSON.stringify(traineeInfo), traineeKey, attemptKey],
+  )
+  const attemptId = attemptRes.rows[0]!.id
+
+  const photoField = fieldRows.rows.find((f) => f.purpose === 'photo')
+  const photoStoredName = photoField ? (traineeInfo[photoField.field_key] ?? null) : null
+
+  let downloadKey: string | null = null
+  if (passed) {
+    downloadKey = crypto.randomBytes(32).toString('hex')
+    await query(
+      `INSERT INTO atld.quiz_certificates
+        (cert_id, course_id, attempt_id, portal_token_id, trainee_name, trainee_info,
+         photo_stored_name, score, passed, issued_at, expires_at, download_key, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true, now(), $9,$10,'portal')`,
+      [certId, courseId, attemptId, t.id, traineeName, JSON.stringify(traineeInfo),
+       photoStoredName, score, expiresAt, downloadKey],
+    )
+  }
+
+  const pdfs = await generateQuizPdfs({
+    attemptId, certId, courseId, courseTitle: course.title,
+    traineeName, traineeInfo,
+    fieldLabels: Object.fromEntries(fieldRows.rows.map((f) => [f.field_key, f.label])),
+    photoFieldKey: photoField?.field_key ?? null,
+    photoStoredName,
+    score, passed, passScore, expiresAt,
+    questionIds,
+    answers: graded.normalizedAnswers,
+  })
+
+  res.json({
+    score, passed, passScore,
+    attempts_used: traineeKey && maxAttempts > 0 ? used + 1 : null,
+    max_attempts: maxAttempts,
+    attempt_pdf: pdfs.detailPdf ? `/api/courses/attempts/${attemptId}/pdf?k=${attemptKey}` : null,
+    certificate: passed
+      ? {
+          certId, traineeName, courseTitle: course.title, score, expiresAt,
+          pdf_url: pdfs.certPdf
+            ? `/api/courses/certificates/${encodeURIComponent(certId!)}/pdf?k=${downloadKey}`
+            : null,
+        }
+      : null,
   })
 })

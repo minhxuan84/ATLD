@@ -31,6 +31,7 @@ const SmartCAConfigPage = lazy(() => import('./pages/cms/SmartCAConfigPage'))
 const WorkerDeclarePage = lazy(() => import('./pages/portal/WorkerDeclarePage'))
 const FieldReportPage = lazy(() => import('./pages/portal/FieldReportPage'))
 const CapaResponsePage = lazy(() => import('./pages/portal/CapaResponsePage'))
+const QuizPage = lazy(() => import('./pages/portal/QuizPage'))
 
 function Protected({ children, role }: { children: ReactNode; role?: 'admin' }) {
   const { user, loading } = useAuth()
@@ -110,6 +111,7 @@ export default function App() {
       <Route path="/khai-bao/:token" element={<WorkerDeclarePage />} />
       <Route path="/bao-an-toan/:token" element={<FieldReportPage />} />
       <Route path="/khac-phuc/:token" element={<CapaResponsePage />} />
+      <Route path="/thi/:token" element={<QuizPage />} />
 
       {/* Toàn bộ trang công khai */}
       <Route path="/*" element={<PublicShell />} />

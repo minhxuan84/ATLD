@@ -12,7 +12,7 @@ import { query } from '../db.js'
 import { buildAttemptPdf, buildCertificatePdf } from './pdf.js'
 import type { AttemptPdfQuestion } from './pdf.js'
 import { writeCertPdf } from './cert-store.js'
-import { resolveTraineePhoto } from './trainee-photo.js'
+import { resolveTraineePhoto, isTraineePhotoName } from './trainee-photo.js'
 
 export interface QuizPdfInput {
   attemptId: number
@@ -39,6 +39,41 @@ export interface QuizPdfInput {
 export interface QuizPdfResult {
   detailPdf: string | null
   certPdf: string | null
+}
+
+export interface QuizFieldRow {
+  field_key: string
+  label: string
+  type: string
+  options: string[]
+  required: boolean
+  purpose: string
+}
+
+/**
+ * Xác thực và làm sạch thông tin học viên khai trong form, dùng chung cho hai lối vào.
+ *
+ * Để mỗi bên tự viết vòng kiểm là sẽ lệch: đường QR không đăng nhập mà lỏng hơn một
+ * điều kiện nào đó là thành cửa sau. Đáng chú ý nhất là trường ảnh — giá trị client
+ * gửi lên phải khớp đúng dạng tên server tự sinh, kiểm ngay tại cửa nộp bài chứ không
+ * để đi vào DB rồi chờ tới lúc dựng PDF.
+ */
+export function validateTraineeInfo(
+  fields: QuizFieldRow[],
+  raw: Record<string, unknown>,
+): { info: Record<string, string> } | { error: string } {
+  const info: Record<string, string> = {}
+  for (const f of fields) {
+    const value = String(raw[f.field_key] ?? '').trim().slice(0, 200)
+    if (f.required && !value)
+      return { error: `Vui lòng ${f.type === 'image' ? 'tải lên' : 'nhập'} "${f.label}".` }
+    if (f.type === 'select' && value && !f.options.includes(value))
+      return { error: `Giá trị "${f.label}" không hợp lệ.` }
+    if (f.type === 'image' && value && !isTraineePhotoName(value))
+      return { error: `Ảnh "${f.label}" không hợp lệ. Vui lòng tải lại ảnh.` }
+    if (value) info[f.field_key] = value
+  }
+  return { info }
 }
 
 /**

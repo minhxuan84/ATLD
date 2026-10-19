@@ -3,8 +3,8 @@ import { query } from '../db.js'
 import { requireAuth, requireSection } from '../auth.js'
 import { findWorkersByTraineeIdentity } from '../lib/hse-training.js'
 import { audit, clientIp, syncWorkerAccess } from '../lib/hse-core.js'
-import { traineePhotoUpload, isTraineePhotoName } from '../lib/trainee-photo.js'
-import { generateQuizPdfs } from '../lib/quiz-record.js'
+import { traineePhotoUpload } from '../lib/trainee-photo.js'
+import { generateQuizPdfs, validateTraineeInfo } from '../lib/quiz-record.js'
 import { resolveCertPdf } from '../lib/cert-store.js'
 import { issueQuiz, gradeQuiz } from '../lib/quiz-grade.js'
 import crypto from 'node:crypto'
@@ -131,24 +131,12 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
   const fieldRows = await query<{ field_key: string; label: string; type: string; options: string[]; required: boolean; purpose: string }>(
     'SELECT field_key, label, type, options, required, purpose FROM quiz_fields ORDER BY sort_order, id',
   )
-  const rawInfo = (req.body?.traineeInfo ?? {}) as Record<string, unknown>
-  const traineeInfo: Record<string, string> = {}
-  for (const f of fieldRows.rows) {
-    const value = String(rawInfo[f.field_key] ?? '').trim().slice(0, 200)
-    if (f.required && !value) {
-      return res.status(400).json({ error: `Vui lòng ${f.type === 'image' ? 'tải lên' : 'nhập'} "${f.label}".` })
-    }
-    if (f.type === 'select' && value && !f.options.includes(value)) {
-      return res.status(400).json({ error: `Giá trị "${f.label}" không hợp lệ.` })
-    }
-    // Trường ảnh chỉ chứa stored_name do endpoint upload sinh ra. Kiểm ngay tại đây để
-    // một giá trị bịa (vd '../../../etc/passwd') bị chặn ở cửa nộp bài, không đi tiếp
-    // vào DB rồi chờ tới lúc dựng PDF mới phát hiện.
-    if (f.type === 'image' && value && !isTraineePhotoName(value)) {
-      return res.status(400).json({ error: `Ảnh "${f.label}" không hợp lệ. Vui lòng tải lại ảnh.` })
-    }
-    if (value) traineeInfo[f.field_key] = value
-  }
+  // validateTraineeInfo dùng chung với portal.ts (đường QR) — kể cả lớp kiểm stored_name
+  // của trường ảnh, để đường không đăng nhập không lỏng hơn đường có đăng nhập.
+  const checked = validateTraineeInfo(
+    fieldRows.rows, (req.body?.traineeInfo ?? {}) as Record<string, unknown>)
+  if ('error' in checked) return res.status(400).json({ error: checked.error })
+  const traineeInfo = checked.info
   // randomize_options PHẢI đọc ở đây: trước Pha H6 endpoint này không đọc cột đó, nên
   // nó xáo phương án lúc phát đề mà lúc chấm hoàn toàn không biết đã xáo — đó chính là
   // chỗ bài bị chấm sai (xem ghi chú trong quiz-grade.ts).

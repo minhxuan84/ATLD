@@ -1,8 +1,11 @@
 import { Router } from 'express'
 import bcrypt from 'bcryptjs'
+import crypto from 'node:crypto'
 import { query } from '../db.js'
 import { requireAuth, requireSection, requireCms, CMS_SECTIONS, requireRole } from '../auth.js'
 import { escapeText } from '../util.js'
+import { audit, clientIp } from '../lib/hse-core.js'
+import { hashToken } from './portal.js'
 import { generateCourse, aiAvailable, buildVideoScript, type GeneratedCourse } from '../ai.js'
 import { createJob, getJob, spawnVideoJob } from '../video.js'
 import { authenticateLdapWithConfig, syncUsersFromAd } from '../lib/ldap.js'
@@ -287,6 +290,91 @@ adminRouter.get('/courses/:id/results', requireSection('khoa-hoc'), async (req, 
     [req.params.id],
   )
   res.json({ results: rows })
+})
+
+// ---- Pha H6: link QR thi tại hiện trường ----
+// Gác bằng requireSection('khoa-hoc'), KHÔNG dùng POST /findings/portal-tokens: endpoint
+// đó gác canInspect (quyền HSE), còn người cần tạo QR là cán bộ đào tạo.
+// Dùng lại hse_portal_tokens để không có cơ chế token thứ hai trong hệ thống.
+
+/** Danh mục chứng nhận đã cấp của một khóa — cả hai lối vào (tài khoản và QR). */
+adminRouter.get('/courses/:id/quiz-certificates', requireSection('khoa-hoc'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT c.id, c.cert_id, c.trainee_name, c.score, c.issued_at, c.expires_at,
+            c.source, c.cert_pdf, c.download_key, c.attempt_id,
+            a.download_key AS attempt_key, a.detail_pdf,
+            u.username
+     FROM atld.quiz_certificates c
+     LEFT JOIN atld.quiz_attempts a ON a.id = c.attempt_id
+     LEFT JOIN atld.users u ON u.id = c.user_id
+     WHERE c.course_id = $1
+     ORDER BY c.issued_at DESC
+     LIMIT 500`,
+    [req.params.id],
+  )
+  res.json({ certificates: rows })
+})
+
+adminRouter.get('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT t.id, t.label, t.expires_at, t.max_uses, t.used_count, t.revoked_at,
+            t.created_at, u.full_name AS created_by_name,
+            (t.revoked_at IS NULL AND t.expires_at > now()
+             AND (t.max_uses IS NULL OR t.used_count < t.max_uses)) AS active
+     FROM atld.hse_portal_tokens t
+     LEFT JOIN atld.users u ON u.id = t.created_by
+     WHERE t.purpose = 'quiz' AND t.course_id = $1
+     ORDER BY t.created_at DESC`,
+    [req.params.id],
+  )
+  res.json({ tokens: rows })
+})
+
+adminRouter.post('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), async (req, res) => {
+  const courseId = req.params.id
+  const c = await query<{ id: string; title: string }>(
+    'SELECT id, title FROM courses WHERE id = $1', [courseId])
+  if (!c.rows[0]) return res.status(404).json({ error: 'Không tìm thấy khóa học.' })
+
+  // Khóa chưa có câu hỏi thì link QR mở ra là lỗi — chặn tại đây để cán bộ biết ngay
+  // thay vì dán QR lên tường rồi học viên quét mới thấy không thi được.
+  const q = await query<{ n: number }>(
+    'SELECT count(*)::int AS n FROM questions WHERE course_id = $1', [courseId])
+  if (!Number(q.rows[0]?.n))
+    return res.status(400).json({ error: 'Khóa học chưa có câu hỏi, chưa tạo được link thi.' })
+
+  const b = req.body ?? {}
+  const days = Math.min(Math.max(Number(b.days) || 30, 1), 180)
+  const maxUses = b.max_uses === null || b.max_uses === undefined || b.max_uses === ''
+    ? null : Math.min(Math.max(Number(b.max_uses), 1), 10000)
+
+  // 32 byte ngẫu nhiên, không dùng randomUUID: đây là bí mật truy cập nên cần entropy
+  // cao hơn UUID v4. DB chỉ giữ SHA-256, token thô chỉ trả về đúng lần này.
+  const raw = crypto.randomBytes(32).toString('base64url')
+  const r = await query<{ id: number }>(
+    `INSERT INTO atld.hse_portal_tokens
+       (token_hash, purpose, label, course_id, expires_at, max_uses, created_by)
+     VALUES ($1, 'quiz', $2, $3, now() + ($4 || ' days')::interval, $5, $6)
+     RETURNING id`,
+    [hashToken(raw), escapeText(String(b.label ?? '').trim()) || null,
+     courseId, String(days), maxUses, req.user!.id],
+  )
+  // token thô KHÔNG vào audit log — log đọc được rộng hơn danh sách link.
+  await audit(req.user!, 'QUIZ_TOKEN_CREATE', 'portal_token', r.rows[0]!.id, null,
+    { courseId, days, maxUses }, clientIp(req))
+  res.status(201).json({ id: r.rows[0]!.id, token: raw, expires_in_days: days })
+})
+
+adminRouter.delete('/courses/:courseId/quiz-tokens/:id', requireSection('khoa-hoc'), async (req, res) => {
+  const r = await query<{ id: number }>(
+    `UPDATE atld.hse_portal_tokens SET revoked_at = now(), revoked_by = $1
+     WHERE id = $2 AND course_id = $3 AND purpose = 'quiz' AND revoked_at IS NULL
+     RETURNING id`,
+    [req.user!.id, Number(req.params.id), req.params.courseId])
+  if (!r.rows[0]) return res.status(404).json({ error: 'Không tìm thấy link còn hiệu lực.' })
+  await audit(req.user!, 'QUIZ_TOKEN_REVOKE', 'portal_token', Number(req.params.id),
+    null, null, clientIp(req))
+  res.json({ ok: true })
 })
 
 // ---- Mục tiêu (goals) ----
