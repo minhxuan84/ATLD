@@ -4,6 +4,7 @@ import { requireAuth } from '../auth.js'
 import { findWorkersByTraineeIdentity } from '../lib/hse-training.js'
 import { audit, clientIp, syncWorkerAccess } from '../lib/hse-core.js'
 import { traineePhotoUpload, isTraineePhotoName } from '../lib/trainee-photo.js'
+import crypto from 'node:crypto'
 
 export const coursesRouter = Router()
 
@@ -129,8 +130,8 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
   const courseId = req.params.id
 
   // Xác thực + làm sạch thông tin học viên theo cấu hình quiz_fields
-  const fieldRows = await query<{ field_key: string; label: string; type: string; options: string[]; required: boolean }>(
-    'SELECT field_key, label, type, options, required FROM quiz_fields ORDER BY sort_order, id',
+  const fieldRows = await query<{ field_key: string; label: string; type: string; options: string[]; required: boolean; purpose: string }>(
+    'SELECT field_key, label, type, options, required, purpose FROM quiz_fields ORDER BY sort_order, id',
   )
   const rawInfo = (req.body?.traineeInfo ?? {}) as Record<string, unknown>
   const traineeInfo: Record<string, string> = {}
@@ -206,12 +207,24 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
           .slice(0, 10)
       : null
 
+  // ── Pha H3: trainee_key để đếm số lần thi theo CCCD qua QR ────────────────
+  // Lấy trường có purpose='id_number' để băm. Không có thì trainee_key để null —
+  // giới hạn max_attempts cho học viên QR rơi về max_uses của token (đếm theo link).
+  const idField = fieldRows.rows.find((f) => f.purpose === 'id_number')
+  const idNumber = idField ? traineeInfo[idField.field_key] : null
+  const traineeKey = idNumber
+    ? crypto.createHash('sha256').update(idNumber.trim().toLowerCase(), 'utf8').digest('hex')
+    : null
+
   // Lưu attempt vào quiz_attempts
-  await query(
-    `INSERT INTO atld.quiz_attempts (user_id, course_id, question_ids, answers, score, passed, submitted_at)
-     VALUES ($1, $2, $3, $4, $5, $6, now())`,
-    [req.user!.id, courseId, JSON.stringify(questionIds || []), JSON.stringify(answers), score, passed],
+  const attemptRes = await query<{ id: number }>(
+    `INSERT INTO atld.quiz_attempts (user_id, course_id, question_ids, answers, score, passed,
+      trainee_info, trainee_key, submitted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) RETURNING id`,
+    [req.user!.id, courseId, JSON.stringify(questionIds || []), JSON.stringify(answers),
+     score, passed, JSON.stringify(traineeInfo), traineeKey],
   )
+  const attemptId = attemptRes.rows[0].id
 
   // Cập nhật progress: chỉ ghi đè khi passed hoặc chưa có passed trước đó
   // (tránh xóa lần đạt cũ khi thi lại trượt)
@@ -261,6 +274,24 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     } catch (e) {
       console.error('[quiz max_attempts → entry_approval]', e)
     }
+  }
+
+  // ── Pha H3: ghi chứng nhận vào danh mục cho cán bộ tra cứu hồ sơ ──────────
+  if (passed) {
+    const photoField = fieldRows.rows.find((f) => f.purpose === 'photo')
+    const photoStoredName = photoField ? (traineeInfo[photoField.field_key] ?? null) : null
+    const nameField = fieldRows.rows.find((f) => f.purpose === 'full_name')
+    const traineeName = nameField ? traineeInfo[nameField.field_key] : req.user!.fullName
+    const downloadKey = crypto.randomBytes(32).toString('hex')
+
+    await query(
+      `INSERT INTO atld.quiz_certificates
+        (cert_id, course_id, attempt_id, user_id, trainee_name, trainee_info, photo_stored_name,
+         score, passed, issued_at, expires_at, download_key, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, 'account')`,
+      [certId, courseId, attemptId, req.user!.id, traineeName, JSON.stringify(traineeInfo),
+       photoStoredName, score, true, expiresAt, downloadKey],
+    )
   }
 
   // Tên trên chứng chỉ ưu tiên họ tên khai báo, không có thì dùng tên tài khoản

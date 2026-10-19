@@ -1015,6 +1015,60 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
         ALTER TABLE atld.quiz_fields ADD CONSTRAINT quiz_fields_type_chk
           CHECK (type IN ('text','select','image'));
       EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+
+    // ── Pha H3: chứa được bài làm của học viên không có tài khoản ──
+    // Học viên quét QR tại lớp không có tài khoản trong hệ thống, nhưng bài làm và
+    // chứng nhận của họ vẫn phải vào hồ sơ. user_id bỏ NOT NULL và thêm đường thứ hai
+    // là portal_token_id; CHECK đảm bảo mỗi bài làm luôn truy được về một trong hai.
+    await query(`ALTER TABLE atld.quiz_attempts ALTER COLUMN user_id DROP NOT NULL`)
+    await query(`ALTER TABLE atld.quiz_attempts ADD COLUMN IF NOT EXISTS
+      portal_token_id INTEGER REFERENCES atld.hse_portal_tokens(id) ON DELETE SET NULL`)
+    await query(`ALTER TABLE atld.quiz_attempts ADD COLUMN IF NOT EXISTS
+      trainee_info JSONB NOT NULL DEFAULT '{}'`)
+    await query(`ALTER TABLE atld.quiz_attempts ADD COLUMN IF NOT EXISTS trainee_key VARCHAR(64)`)
+    await query(`ALTER TABLE atld.quiz_attempts ADD COLUMN IF NOT EXISTS detail_pdf VARCHAR(255)`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.quiz_attempts ADD CONSTRAINT quiz_attempts_owner_chk
+          CHECK (user_id IS NOT NULL OR portal_token_id IS NOT NULL);
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    // Đếm số lần thi của học viên vào bằng QR theo CCCD đã băm.
+    await query(`CREATE INDEX IF NOT EXISTS idx_quiz_attempts_trainee
+      ON atld.quiz_attempts(trainee_key, course_id) WHERE trainee_key IS NOT NULL`)
+
+    // Danh mục chứng nhận — một bảng cho CẢ HAI lối vào (tài khoản và QR), để cán bộ
+    // đào tạo tra ra hồ sơ ở một chỗ. `progress` vẫn ghi như cũ cho người có tài khoản
+    // (không phá Dashboard và findWorkersByTraineeIdentity); bảng này là bản ghi hồ sơ
+    // thêm vào, không thay thế.
+    await query(`CREATE TABLE IF NOT EXISTS atld.quiz_certificates (
+      id SERIAL PRIMARY KEY,
+      cert_id VARCHAR(60) UNIQUE NOT NULL,
+      course_id VARCHAR(60) NOT NULL REFERENCES atld.courses(id) ON DELETE CASCADE,
+      attempt_id INTEGER REFERENCES atld.quiz_attempts(id) ON DELETE SET NULL,
+      user_id INTEGER REFERENCES atld.users(id) ON DELETE SET NULL,
+      portal_token_id INTEGER REFERENCES atld.hse_portal_tokens(id) ON DELETE SET NULL,
+      trainee_name VARCHAR(150) NOT NULL,
+      trainee_info JSONB NOT NULL DEFAULT '{}',
+      photo_stored_name VARCHAR(255),
+      score INTEGER NOT NULL,
+      passed BOOLEAN NOT NULL,
+      issued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      expires_at DATE,
+      cert_pdf VARCHAR(255),
+      -- 32 byte ngẫu nhiên: cert_id có Date.now() trong đó nên đoán được, không dùng
+      -- một mình làm cửa tải chứng nhận.
+      download_key VARCHAR(64) NOT NULL,
+      source VARCHAR(10) NOT NULL DEFAULT 'account'
+    )`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.quiz_certificates ADD CONSTRAINT quiz_certificates_source_chk
+          CHECK (source IN ('account','portal'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_quiz_certificates_course
+      ON atld.quiz_certificates(course_id, issued_at DESC)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_quiz_certificates_user
+      ON atld.quiz_certificates(user_id) WHERE user_id IS NOT NULL`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }
