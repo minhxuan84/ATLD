@@ -5,6 +5,7 @@ import { useReveal } from '../hooks/useReveal'
 import { useConfig } from '../context/ConfigContext'
 import LandingHeader from '../components/home/LandingHeader'
 import CountUp from '../components/CountUp'
+import { FIELD_COLORS, resolveFieldIcon } from '../lib/fieldIcons'
 import {
   ShieldCheck, PlayCircle, ChevronDown, GraduationCap, FileText, Newspaper, Leaf,
   Award, Users, FileCheck, Target, ArrowRight, MapPin, Mail, Phone,
@@ -33,11 +34,14 @@ const SECTIONS = [
   { id: 'lien-he', label: 'Liên hệ' },
 ]
 
+// Nội dung mặc định cho 4 thẻ "Lĩnh vực hoạt động". CMS ghi đè được từng ô trong
+// "Trang tĩnh & Nhận diện"; ô nào để trống thì lấy lại giá trị ở đây — cùng cách
+// HERO_FALLBACK đang làm với ảnh banner, để trang chủ không bao giờ ra thẻ rỗng.
 const FIELDS = [
-  { icon: GraduationCap, title: 'Huấn luyện ATLĐ', desc: 'Học qua video, tóm tắt nội dung, trắc nghiệm và cấp chứng chỉ trực tuyến theo 6 nhóm đối tượng.', to: '/huan-luyen', color: 'from-vicem-500 to-vicem-700' },
-  { icon: FileText, title: 'Tài liệu hồ sơ', desc: 'Lưu trữ, phân quyền và tìm kiếm tài liệu, hồ sơ an toàn lao động và môi trường.', to: '/tai-lieu', color: 'from-emerald-500 to-emerald-700' },
-  { icon: Leaf, title: 'Bảo vệ môi trường', desc: 'Quản lý chất thải, quan trắc môi trường định kỳ, kiểm soát bụi và khí thải trong sản xuất.', to: '/huan-luyen', color: 'from-teal-500 to-teal-700' },
-  { icon: Newspaper, title: 'Tin tức & Thông báo', desc: 'Cập nhật sự kiện, cảnh báo an toàn và thông báo mới nhất của VICEM Hà Tiên.', to: '/tin-tuc', color: 'from-hatien-500 to-hatien-700' },
+  { icon: GraduationCap, title: 'Huấn luyện ATLĐ', desc: 'Học qua video, tóm tắt nội dung, trắc nghiệm và cấp chứng chỉ trực tuyến theo 6 nhóm đối tượng.', to: '/huan-luyen', color: FIELD_COLORS[0] },
+  { icon: FileText, title: 'Tài liệu hồ sơ', desc: 'Lưu trữ, phân quyền và tìm kiếm tài liệu, hồ sơ an toàn lao động và môi trường.', to: '/tai-lieu', color: FIELD_COLORS[1] },
+  { icon: Leaf, title: 'Bảo vệ môi trường', desc: 'Quản lý chất thải, quan trắc môi trường định kỳ, kiểm soát bụi và khí thải trong sản xuất.', to: '/huan-luyen', color: FIELD_COLORS[2] },
+  { icon: Newspaper, title: 'Tin tức & Thông báo', desc: 'Cập nhật sự kiện, cảnh báo an toàn và thông báo mới nhất của VICEM Hà Tiên.', to: '/tin-tuc', color: FIELD_COLORS[3] },
 ]
 
 // Icon cố định cho 4 chỉ số; giá trị & nhãn lấy từ cấu hình (CMS chỉnh được).
@@ -56,7 +60,7 @@ function parseStat(raw: string): { prefix: string; end: number; suffix: string; 
 
 const NEWS_COLOR: Record<string, string> = {
   'Thông báo': 'bg-vicem-100 text-vicem-700',
-  'Sự kiện': 'bg-hatien-100 text-hatien-700',
+  'Sự kiện': 'bg-eco-100 text-eco-700',
   'Cảnh báo an toàn': 'bg-amber-100 text-amber-700',
 }
 
@@ -82,6 +86,19 @@ export default function HomePage() {
     label: config[`stat_${i + 1}_label`] ?? '',
     ...parseStat(config[`stat_${i + 1}_value`] ?? ''),
   }))
+
+  // Thẻ "Lĩnh vực hoạt động": từng ô lấy từ CMS, trống thì về mặc định trong FIELDS.
+  // Đường dẫn đã được server kiểm là đường dẫn nội bộ trước khi lưu (xem config.ts).
+  const fields = FIELDS.map((d, i) => {
+    const n = i + 1
+    return {
+      title: config[`field_${n}_title`]?.trim() || d.title,
+      desc: config[`field_${n}_desc`]?.trim() || d.desc,
+      to: config[`field_${n}_link`]?.trim() || d.to,
+      icon: resolveFieldIcon(config[`field_${n}_icon`]?.trim(), d.icon),
+      color: d.color,
+    }
+  })
 
   useEffect(() => {
     api<HomeData>('/home').then(setData).catch(() => {})
@@ -162,16 +179,21 @@ export default function HomePage() {
               aria-hidden
             />
           ))}
-          {/* Lớp phủ gradient nhận diện để chữ nổi rõ */}
-          <div className="absolute inset-0 bg-gradient-to-br from-vicem-900/90 via-vicem-800/80 to-hatien-700/60" aria-hidden />
+          {/* Lớp phủ nhận diện. Trước đây là /90 /80 /60 nên ảnh banner gần như bị
+              nhuộm kín, trông tối; hạ xuống /55 /45 /35 để thấy được ảnh nhà máy. */}
+          <div className="absolute inset-0 bg-gradient-to-br from-eco-800/55 via-vicem-800/45 to-eco-600/35" aria-hidden />
+          {/* Scrim cục bộ sau khối chữ: hạ lớp phủ chung thì chữ trắng trên ảnh sáng
+              mất tương phản. Tối cục bộ ở giữa thay vì làm tối lại cả banner — giữ
+              được ảnh sáng mà chữ vẫn đọc được. */}
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_55%_50%_at_50%_45%,rgba(2,20,12,0.55),transparent_70%)]" aria-hidden />
           <div className="pointer-events-none absolute inset-0 bg-grid-white [background-size:44px_44px] [mask-image:radial-gradient(ellipse_at_center,black,transparent_75%)]" aria-hidden />
-          <div className="pointer-events-none absolute -right-24 top-16 h-96 w-96 rounded-full bg-hatien-500/25 blur-3xl animate-aurora" aria-hidden />
+          <div className="pointer-events-none absolute -right-24 top-16 h-96 w-96 rounded-full bg-eco-600/25 blur-3xl animate-aurora" aria-hidden />
           <div className="pointer-events-none absolute bottom-10 -left-16 h-80 w-80 rounded-full bg-vicem-400/20 blur-3xl animate-float-slower" aria-hidden />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-slate-50 to-transparent" aria-hidden />
 
           <div className="relative mx-auto max-w-4xl px-4 text-center text-white">
             <span className="glass inline-flex items-center gap-2 rounded-full px-5 py-2 text-base font-medium shadow-glow">
-              <ShieldCheck className="h-5 w-5 text-hatien-200" /> {config.hero_badge}
+              <ShieldCheck className="h-5 w-5 text-eco-200" /> {config.hero_badge}
             </span>
             <h1 className="mt-5 text-4xl font-extrabold leading-[1.1] tracking-tight sm:mt-7 sm:text-5xl md:text-7xl">
               <span className="text-gradient">{config.hero_title}</span>
@@ -180,7 +202,7 @@ export default function HomePage() {
               {config.hero_subtitle}
             </p>
             <div className="mt-9 flex flex-wrap justify-center gap-4">
-              <Link to="/huan-luyen" className="group inline-flex items-center gap-2 rounded-xl bg-hatien-500 px-8 py-4 text-lg font-semibold shadow-glow-red transition hover:-translate-y-0.5 hover:bg-hatien-600">
+              <Link to="/huan-luyen" className="group inline-flex items-center gap-2 rounded-xl bg-eco-600 px-8 py-4 text-lg font-semibold shadow-glow-green transition hover:-translate-y-0.5 hover:bg-eco-700">
                 <PlayCircle className="h-6 w-6 transition group-hover:scale-110" /> Bắt đầu huấn luyện
               </Link>
               <a href="#gioi-thieu" className="glass inline-flex items-center gap-2 rounded-xl px-8 py-4 text-lg font-semibold transition hover:-translate-y-0.5 hover:bg-white/25">
@@ -191,7 +213,7 @@ export default function HomePage() {
             <div className="mx-auto mt-12 flex max-w-2xl flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm text-vicem-50/80">
               {stats.map((s) => (
                 <span key={s.label} className="inline-flex items-center gap-2">
-                  <s.icon className="h-4 w-4 text-hatien-200" />
+                  <s.icon className="h-4 w-4 text-eco-200" />
                   <b className="font-bold text-white">{s.prefix}{s.group ? s.end.toLocaleString('vi-VN') : s.end}{s.suffix}</b> {s.label}
                 </span>
               ))}
@@ -204,7 +226,7 @@ export default function HomePage() {
                 key={i}
                 onClick={() => setSlide(i)}
                 aria-label={`Ảnh ${i + 1}`}
-                className={`h-2.5 rounded-full transition-all ${i === slide ? 'w-8 bg-hatien-500' : 'w-2.5 bg-white/50 hover:bg-white/80'}`}
+                className={`h-2.5 rounded-full transition-all ${i === slide ? 'w-8 bg-eco-600' : 'w-2.5 bg-white/50 hover:bg-white/80'}`}
               />
             ))}
           </div>
@@ -217,7 +239,7 @@ export default function HomePage() {
         <section id="gioi-thieu" className="snap-section flex items-center bg-white py-20">
           <div className="mx-auto grid max-w-6xl gap-10 px-4 md:grid-cols-2 md:items-center">
             <div className="reveal">
-              <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-hatien-500">Về chúng tôi</span>
+              <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-eco-600">Về chúng tôi</span>
               <h2 className="mt-3 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">{data?.intro.heading ?? 'Huấn luyện An toàn lao động & Môi trường'}</h2>
               <div className="mt-4 space-y-3 text-slate-600">
                 {(data?.intro.paragraphs ?? []).map((p, i) => <p key={i}>{p}</p>)}
@@ -247,15 +269,19 @@ export default function HomePage() {
         <section id="linh-vuc" className="snap-section flex items-center bg-slate-100 py-20">
           <div className="mx-auto max-w-6xl px-4">
             <div className="reveal text-center">
-              <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-hatien-500">Lĩnh vực hoạt động</span>
-              <h2 className="mt-3 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">Các chức năng chính của hệ thống</h2>
+              <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-eco-600">
+                {config.fields_eyebrow?.trim() || 'Lĩnh vực hoạt động'}
+              </span>
+              <h2 className="mt-3 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">
+                {config.fields_heading?.trim() || 'Các chức năng chính của hệ thống'}
+              </h2>
             </div>
             <div className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-              {FIELDS.map((f, i) => {
+              {fields.map((f, i) => {
                 const Icon = f.icon
                 return (
                   <Link
-                    key={f.title} to={f.to}
+                    key={`${i}-${f.title}`} to={f.to}
                     className="reveal card-hover group relative flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-6"
                     style={{ transitionDelay: `${i * 80}ms` }}
                   >
@@ -278,10 +304,10 @@ export default function HomePage() {
         {/* ===== NĂNG LỰC (số liệu + timeline + mục tiêu) ===== */}
         <section id="nang-luc" className="snap-section relative flex items-center overflow-hidden bg-vicem-900 bg-gradient-to-br from-vicem-900 via-vicem-800 to-vicem-700 py-20 text-white">
           <div className="pointer-events-none absolute inset-0 bg-grid-white [background-size:44px_44px] [mask-image:radial-gradient(ellipse_at_top,black,transparent_70%)]" aria-hidden />
-          <div className="pointer-events-none absolute -left-20 top-1/4 h-72 w-72 rounded-full bg-hatien-500/20 blur-3xl animate-aurora" aria-hidden />
+          <div className="pointer-events-none absolute -left-20 top-1/4 h-72 w-72 rounded-full bg-eco-600/20 blur-3xl animate-aurora" aria-hidden />
           <div className="relative mx-auto max-w-6xl px-4">
             <div className="reveal text-center">
-              <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-hatien-200">Năng lực &amp; Thành tích</span>
+              <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-eco-200">Năng lực &amp; Thành tích</span>
               <h2 className="mt-3 text-4xl font-bold tracking-tight md:text-5xl">Những con số biết nói</h2>
             </div>
 
@@ -291,7 +317,7 @@ export default function HomePage() {
                 return (
                   <div key={s.label} className="reveal glass rounded-3xl p-6 text-center transition hover:-translate-y-1 hover:bg-white/15" style={{ transitionDelay: `${i * 80}ms` }}>
                     <span className="mx-auto inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-white/10 ring-1 ring-white/20">
-                      <Icon className="h-6 w-6 text-hatien-200" />
+                      <Icon className="h-6 w-6 text-eco-200" />
                     </span>
                     <p className="mt-4 text-4xl font-extrabold tracking-tight">
                       <CountUp end={s.end} run={statsVisible} prefix={s.prefix} suffix={s.suffix} group={s.group} />
@@ -305,11 +331,11 @@ export default function HomePage() {
             <div className="mt-12 grid gap-8 lg:grid-cols-2">
               {/* Timeline */}
               <div className="reveal">
-                <h3 className="flex items-center gap-2 text-lg font-semibold"><Award className="h-5 w-5 text-hatien-200" /> Cột mốc thành tích</h3>
+                <h3 className="flex items-center gap-2 text-lg font-semibold"><Award className="h-5 w-5 text-eco-200" /> Cột mốc thành tích</h3>
                 <ol className="mt-4 space-y-3">
                   {(data?.milestones ?? []).map((m) => (
                     <li key={m.year_label} className="flex gap-3 rounded-xl bg-white/5 p-3">
-                      <span className="shrink-0 rounded-lg bg-hatien-500 px-2.5 py-1 text-sm font-bold">{m.year_label}</span>
+                      <span className="shrink-0 rounded-lg bg-eco-600 px-2.5 py-1 text-sm font-bold">{m.year_label}</span>
                       <div>
                         <p className="font-medium">{m.title}</p>
                         <p className="text-sm text-vicem-50/70">{m.detail}</p>
@@ -320,7 +346,7 @@ export default function HomePage() {
               </div>
               {/* Mục tiêu: gom nhóm theo Năm/Tháng, có nút xổ ra / thu vào */}
               <div id="goals-block" className="reveal" style={{ transitionDelay: '120ms' }}>
-                <h3 className="flex items-center gap-2 text-lg font-semibold"><Target className="h-5 w-5 text-hatien-200" /> Kế hoạch mục tiêu</h3>
+                <h3 className="flex items-center gap-2 text-lg font-semibold"><Target className="h-5 w-5 text-eco-200" /> Kế hoạch mục tiêu</h3>
                 <div className="mt-4 space-y-3">
                   <GoalGroup
                     scope="year" title="Mục tiêu năm"
@@ -345,7 +371,7 @@ export default function HomePage() {
           <div className="mx-auto max-w-6xl px-4">
             <div className="reveal flex items-end justify-between">
               <div>
-                <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-hatien-500">Tin tức</span>
+                <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-eco-600">Tin tức</span>
                 <h2 className="mt-3 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">Cập nhật mới nhất</h2>
               </div>
               <Link to="/tin-tuc" className="hidden items-center gap-1 font-semibold text-vicem-600 hover:gap-2 transition-all sm:inline-flex">
@@ -377,7 +403,7 @@ export default function HomePage() {
           <div className="flex flex-1 items-center bg-slate-100 py-20">
             <div className="mx-auto grid max-w-6xl gap-10 px-4 md:grid-cols-2">
               <div className="reveal">
-                <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-hatien-500">Liên hệ</span>
+                <span className="eyebrow text-sm font-semibold uppercase tracking-wider text-eco-600">Liên hệ</span>
                 <h2 className="mt-3 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">Kết nối với chúng tôi</h2>
                 <p className="mt-3 text-slate-600">Mọi thắc mắc về công tác huấn luyện an toàn lao động và môi trường, vui lòng liên hệ Ban ATLĐ.</p>
                 <ul className="mt-6 space-y-4 text-slate-700">
@@ -424,7 +450,7 @@ function GoalGroup({ scope, title, goals, defaultOpen, statsVisible }: {
   useEffect(() => { setOpen(defaultOpen) }, [defaultOpen])
 
   const isYear = scope === 'year'
-  const headTint = isYear ? 'text-vicem-100' : 'text-hatien-100'
+  const headTint = isYear ? 'text-vicem-100' : 'text-eco-100'
   if (goals.length === 0) return null
 
   return (
@@ -435,7 +461,7 @@ function GoalGroup({ scope, title, goals, defaultOpen, statsVisible }: {
         className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left transition hover:bg-white/5"
       >
         <span className={`flex items-center gap-2 text-sm font-semibold ${headTint}`}>
-          <span className={`h-2.5 w-2.5 rounded-full ${isYear ? 'bg-vicem-300' : 'bg-hatien-400'}`} />
+          <span className={`h-2.5 w-2.5 rounded-full ${isYear ? 'bg-vicem-300' : 'bg-eco-400'}`} />
           {title}
           <span className="text-xs font-normal text-white/40">({goals.length})</span>
         </span>
@@ -446,7 +472,7 @@ function GoalGroup({ scope, title, goals, defaultOpen, statsVisible }: {
         <div className="overflow-hidden">
           <div className="space-y-5 px-4 pb-4 pt-1">
             {goals.map((g, i) => {
-              const barColor = g.progress === 100 ? 'bg-emerald-400' : isYear ? 'bg-vicem-300' : 'bg-hatien-400'
+              const barColor = g.progress === 100 ? 'bg-emerald-400' : isYear ? 'bg-vicem-300' : 'bg-eco-400'
               const run = statsVisible && open
               return (
                 <div key={i}>

@@ -3,6 +3,7 @@ import { api } from '../../lib/api'
 import { useConfig } from '../../context/ConfigContext'
 import Logo from '../../components/Logo'
 import ImageUpload from './ImageUpload'
+import { FIELD_ICONS } from '../../lib/fieldIcons'
 import { Save, Check } from 'lucide-react'
 
 // Nhóm các trường cấu hình để hiển thị theo khu vực
@@ -148,6 +149,97 @@ export default function SiteSettings() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Lĩnh vực hoạt động (trang chủ) */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+          <h2 className="font-semibold text-slate-800">Lĩnh vực hoạt động (trang chủ)</h2>
+          <p className="text-sm text-slate-500">
+            Khu 4 thẻ giới thiệu các mảng hoạt động. Ô nào để trống sẽ dùng lại nội dung mặc định,
+            nên không bao giờ ra thẻ rỗng. Đường dẫn phải là đường dẫn trong hệ thống, bắt đầu bằng
+            <b> /</b> (vd: <code className="rounded bg-slate-100 px-1">/huan-luyen</code>).
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-slate-700">Nhãn nhỏ phía trên tiêu đề</label>
+              <input
+                value={form.fields_eyebrow ?? ''} maxLength={60}
+                onChange={(e) => setForm({ ...form, fields_eyebrow: e.target.value })}
+                placeholder="Lĩnh vực hoạt động"
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700">Tiêu đề khu</label>
+              <input
+                value={form.fields_heading ?? ''} maxLength={160}
+                onChange={(e) => setForm({ ...form, fields_heading: e.target.value })}
+                placeholder="Các chức năng chính của hệ thống"
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            {[1, 2, 3, 4].map((n) => {
+              const iconKey = form[`field_${n}_icon`] ?? ''
+              const Preview = iconKey ? FIELD_ICONS[iconKey]?.icon : undefined
+              return (
+                <div key={n} className="rounded-xl border border-slate-200 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Thẻ {n}</p>
+                  <div className="mt-2 space-y-2">
+                    <div>
+                      <label className="block text-xs text-slate-500">Tiêu đề</label>
+                      <input
+                        value={form[`field_${n}_title`] ?? ''} maxLength={80}
+                        onChange={(e) => setForm({ ...form, [`field_${n}_title`]: e.target.value })}
+                        placeholder="Huấn luyện ATLĐ"
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-500">Mô tả</label>
+                      <textarea
+                        value={form[`field_${n}_desc`] ?? ''} maxLength={300} rows={3}
+                        onChange={(e) => setForm({ ...form, [`field_${n}_desc`]: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-slate-500">Đường dẫn</label>
+                        <input
+                          value={form[`field_${n}_link`] ?? ''} maxLength={120}
+                          onChange={(e) => setForm({ ...form, [`field_${n}_link`]: e.target.value })}
+                          placeholder="/huan-luyen"
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-500">Biểu tượng</label>
+                        <div className="mt-1 flex items-center gap-2">
+                          <select
+                            value={iconKey}
+                            onChange={(e) => setForm({ ...form, [`field_${n}_icon`]: e.target.value })}
+                            className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                          >
+                            <option value="">— Mặc định —</option>
+                            {Object.entries(FIELD_ICONS).map(([k, v]) => (
+                              <option key={k} value={k}>{v.label}</option>
+                            ))}
+                          </select>
+                          {/* Xem trước ngay: tên icon là tiếng Anh, không ai nhớ nổi
+                              'ClipboardCheck' trông thế nào. */}
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                            {Preview ? <Preview className="h-5 w-5" /> : <span className="text-[10px]">mặc định</span>}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         </div>
 

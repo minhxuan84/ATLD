@@ -24,7 +24,24 @@ const FIELDS: Record<string, number> = {
   stat_2_value: 20, stat_2_label: 80,
   stat_3_value: 20, stat_3_label: 80,
   stat_4_value: 20, stat_4_label: 80,
+  // Khu "Lĩnh vực hoạt động" trên trang chủ: nhãn nhỏ, tiêu đề, và 4 thẻ.
+  // field_N_icon lưu KHÓA icon (vd 'GraduationCap'), không lưu SVG — trang chủ tra
+  // khóa đó trong một bảng whitelist, khóa lạ thì dùng icon mặc định.
+  fields_eyebrow: 60, fields_heading: 160,
+  field_1_title: 80, field_1_desc: 300, field_1_link: 120, field_1_icon: 40,
+  field_2_title: 80, field_2_desc: 300, field_2_link: 120, field_2_icon: 40,
+  field_3_title: 80, field_3_desc: 300, field_3_link: 120, field_3_icon: 40,
+  field_4_title: 80, field_4_desc: 300, field_4_link: 120, field_4_icon: 40,
 }
+
+/**
+ * Khóa chứa đường dẫn (đi vào `to=` của <Link>), khác mọi khóa còn lại chỉ hiển thị
+ * dạng text. Giá trị `javascript:…` ở đây là XSS, nên chỉ nhận đường dẫn nội bộ.
+ * Chặn ngay tại tầng dữ liệu: người ghi được đã phải có quyền 'trang-tinh', nhưng
+ * một giá trị sai lưu vào DB rồi thì mọi khách vào trang chủ đều ăn.
+ */
+const PATH_KEYS = /^field_\d_link$/
+const SAFE_PATH = /^\/[\w\-/]*$/
 
 // Công khai: đọc toàn bộ cấu hình trang tĩnh
 configRouter.get('/', async (_req, res) => {
@@ -47,6 +64,19 @@ configRouter.put('/', requireAuth, requireSection('trang-tinh'), async (req, res
   const body = req.body ?? {}
   const updates = Object.entries(body).filter(([k]) => k in FIELDS)
   if (updates.length === 0) return res.status(400).json({ error: 'Không có trường hợp lệ để cập nhật.' })
+
+  // Kiểm toàn bộ đường dẫn TRƯỚC khi ghi bất cứ khóa nào: nửa bộ giá trị đã lưu còn
+  // nửa kia bị từ chối thì khu "Lĩnh vực" ra tình trạng lệch, khó lần ra nguyên nhân.
+  for (const [key, raw] of updates) {
+    if (!PATH_KEYS.test(key)) continue
+    const v = String(raw ?? '').trim()
+    if (v && !SAFE_PATH.test(v)) {
+      return res.status(400).json({
+        error: `Đường dẫn của thẻ lĩnh vực phải là đường dẫn trong hệ thống, `
+          + `bắt đầu bằng "/" (vd: /huan-luyen). Giá trị không hợp lệ: "${v.slice(0, 40)}".`,
+      })
+    }
+  }
 
   for (const [key, raw] of updates) {
     // React tự escape khi render text node nên không escape ở đây (tránh double-escape);
