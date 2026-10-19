@@ -19,6 +19,9 @@ import { configRouter } from './routes/config.js'
 import { mediaRouter } from './routes/media.js'
 
 const app = express()
+// Tin tưởng 1 cấp reverse proxy (nginx) để req.ip trả IP thực của client
+// thay vì 127.0.0.1 — cần thiết cho rate-limiter (portalLimiter, authLimiter).
+app.set('trust proxy', 1)
 const isProd = process.env.NODE_ENV === 'production'
 
 // Ở production ta phục vụ luôn bản build React từ cùng origin nên nới CSP để
