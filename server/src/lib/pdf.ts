@@ -386,65 +386,81 @@ export function buildCertificatePdf(data: CertificatePdfData): Promise<Buffer> {
     const hasVn = FR !== 'Helvetica'
     const t = (s: string): string => (hasVn ? s : stripTones(s))
 
-    // ── Khung ảnh bên trái (100×120) và dấu PASSED chồng lên ──
-    const photoBox = { x: 60, y: 80, w: 100, h: 120 }
+    // A4 ngang = 842×595pt, lề 50 → vùng vẽ y từ 50 tới 545.
+    // Đặt y TƯỜNG MINH cho từng khối, KHÔNG dùng moveDown: trên trang ngang chỉ cần
+    // một khối trôi quá y=545 là PDFKit tự sang trang 2, ra chứng nhận 2 trang.
+    const BOTTOM = 545
+
+    // Viền trang trí
+    doc.save().lineWidth(2).strokeColor('#0055A4')
+      .rect(32, 32, 842 - 64, 595 - 64).stroke()
+    doc.lineWidth(0.5).strokeColor('#16A34A').rect(40, 40, 842 - 80, 595 - 80).stroke()
+    doc.restore()
+
+    // ── Ảnh học viên bên trái + dấu PASSED chồng lên ──
+    // Khung 3×4 như ảnh thẻ. Thiếu ảnh thì vẽ khung rỗng và vẫn ra chứng nhận —
+    // thiếu ảnh không được làm người đạt bài mất chứng nhận.
+    const photoBox = { x: 75, y: 150, w: 120, h: 160 }
+    let drewPhoto = false
     if (data.photoPath) {
       try {
         doc.image(data.photoPath, photoBox.x, photoBox.y, { fit: [photoBox.w, photoBox.h] })
+        drewPhoto = true
       } catch {
-        // Không đọc được ảnh: vẽ khung rỗng, không block chứng nhận.
-        doc.rect(photoBox.x, photoBox.y, photoBox.w, photoBox.h).stroke()
+        // Ảnh hỏng/không đọc được: rơi về khung rỗng như trường hợp không có ảnh.
       }
-    } else {
-      // Không có ảnh: vẽ khung trống
-      doc.rect(photoBox.x, photoBox.y, photoBox.w, photoBox.h).stroke()
     }
-
-    // Dấu PASSED đóng chồng lên ảnh: khung xoay 15° + chữ đậm
-    doc.save()
-    doc.translate(photoBox.x + photoBox.w / 2, photoBox.y + photoBox.h / 2)
-    doc.rotate(-15, { origin: [0, 0] })
-    doc.roundedRect(-40, -12, 80, 24, 4).lineWidth(2).strokeColor('#E2231A').stroke()
-    doc.fontSize(14).font(FB).fillColor('#E2231A').text('PASSED', -40, -7, {
-      width: 80, align: 'center',
-    })
+    doc.save().lineWidth(1).strokeColor(drewPhoto ? '#94a3b8' : '#cbd5e1')
+      .rect(photoBox.x, photoBox.y, photoBox.w, photoBox.h).stroke()
+    if (!drewPhoto) {
+      doc.fontSize(8).font(FR).fillColor('#94a3b8')
+        .text(t('(không có ảnh)'), photoBox.x, photoBox.y + photoBox.h / 2 - 4,
+          { width: photoBox.w, align: 'center' })
+    }
     doc.restore()
 
-    // ── Nội dung chứng nhận bên phải ảnh ──
-    const contentX = 190
-    doc.fontSize(20).font(FB).fillColor('black')
-      .text(t('CHỨNG NHẬN HOÀN THÀNH'), contentX, 80, { width: 550, align: 'center' })
-    doc.fontSize(12).font(FR)
-      .text(t(data.courseTitle), contentX, 110, { width: 550, align: 'center' })
-    doc.moveDown(1.5)
+    // Dấu PASSED: khung xoay -15° + chữ đậm, vẽ SAU ảnh nên nằm chồng lên.
+    doc.save()
+    doc.translate(photoBox.x + photoBox.w / 2, photoBox.y + photoBox.h / 2)
+    doc.rotate(-15)
+    doc.lineWidth(2).strokeColor('#E2231A').roundedRect(-52, -16, 104, 32, 4).stroke()
+    doc.fontSize(17).font(FB).fillColor('#E2231A')
+      .text('PASSED', -52, -10, { width: 104, align: 'center' })
+    doc.restore()
 
-    doc.fontSize(11).font(FR).text(t('Chứng nhận rằng'), contentX, doc.y, { width: 550, align: 'center' })
-    doc.fontSize(16).font(FB)
-      .text(t(data.traineeName), contentX, doc.y + 10, { width: 550, align: 'center' })
-    doc.fontSize(10).font(FR).moveDown(1)
-      .text(t('đã hoàn thành chương trình huấn luyện với kết quả:'), contentX, doc.y, {
-        width: 550, align: 'center',
-      })
-    doc.fontSize(12).font(FB).moveDown(0.5)
-      .text(t(`Điểm: ${data.score}/100 — ĐẠT`), contentX, doc.y, { width: 550, align: 'center' })
+    // ── Nội dung bên phải ảnh ──
+    const cx = 225
+    const cw = 545   // 225 + 545 = 770, còn trong lề phải (842 - 50 = 792)
+    const mid = { width: cw, align: 'center' as const }
 
-    doc.fontSize(9).font(FR).moveDown(1.5)
-    const issued = d(data.issuedAt)
+    doc.fillColor('black')
+    doc.fontSize(11).font(FR).text(t('VICEM HÀ TIÊN'), cx, 70, mid)
+    doc.fontSize(22).font(FB).text(t('CHỨNG NHẬN HOÀN THÀNH'), cx, 95, mid)
+    doc.fontSize(9).font(FR).fillColor('#64748b')
+      .text(t('HUẤN LUYỆN AN TOÀN LAO ĐỘNG & MÔI TRƯỜNG'), cx, 124, mid)
+
+    doc.fillColor('black').fontSize(10).font(FR).text(t('Chứng nhận rằng'), cx, 160, mid)
+    doc.fontSize(18).font(FB).text(t(data.traineeName), cx, 180, mid)
+    doc.fontSize(10).font(FR)
+      .text(t('đã hoàn thành chương trình huấn luyện'), cx, 210, mid)
+    doc.fontSize(12).font(FB).text(t(data.courseTitle), cx, 228, mid)
+    doc.fontSize(12).font(FB).fillColor('#16A34A')
+      .text(t(`Điểm: ${data.score}/100 — ĐẠT`), cx, 258, mid)
+
+    doc.fillColor('black').fontSize(9).font(FR)
     const expires = data.expiresAt ? d(new Date(data.expiresAt).toISOString()) : null
-    doc.text(t(`Ngày cấp: ${issued}`), contentX, doc.y, { width: 550, align: 'center' })
-    if (expires) {
-      doc.text(t(`Hiệu lực đến: ${expires}`), contentX, doc.y, { width: 550, align: 'center' })
-    }
+    doc.text(t(`Ngày cấp: ${d(data.issuedAt)}`), cx, 288, mid)
+    if (expires) doc.text(t(`Hiệu lực đến: ${expires}`), cx, 302, mid)
 
-    doc.moveDown(3)
-    doc.fontSize(10).font(FB).text(t('NGƯỜI PHỤ TRÁCH'), contentX + 350, doc.y, {
-      width: 200, align: 'center',
-    })
-    doc.fontSize(8).font(FR).fillColor('grey').moveDown(0.3)
-      .text(t('(ký, ghi rõ họ tên)'), contentX + 350, doc.y, { width: 200, align: 'center' })
+    // Khối ký bên phải, cố định y để không đụng khối trên.
+    const sigX = 560
+    doc.fontSize(10).font(FB).text(t('NGƯỜI PHỤ TRÁCH'), sigX, 370, { width: 200, align: 'center' })
+    doc.fontSize(8).font(FR).fillColor('grey')
+      .text(t('(ký, ghi rõ họ tên)'), sigX, 384, { width: 200, align: 'center' })
 
+    // Mã chứng nhận ở chân trang — phải nằm TRÊN BOTTOM, nếu không sẽ sinh trang 2.
     doc.fillColor('grey').fontSize(7)
-      .text(t(`Mã chứng nhận: ${data.certId}`), 50, 550, { align: 'right' })
+      .text(t(`Mã chứng nhận: ${data.certId}`), 60, BOTTOM - 15, { width: 722, align: 'right' })
 
     doc.end()
   })

@@ -1027,6 +1027,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
       trainee_info JSONB NOT NULL DEFAULT '{}'`)
     await query(`ALTER TABLE atld.quiz_attempts ADD COLUMN IF NOT EXISTS trainee_key VARCHAR(64)`)
     await query(`ALTER TABLE atld.quiz_attempts ADD COLUMN IF NOT EXISTS detail_pdf VARCHAR(255)`)
+    // Khóa tải bài làm, riêng với download_key của chứng nhận: học viên TRƯỢT không có
+    // chứng nhận nên không có khóa nào, nhưng vẫn phải tải được bài làm để biết sai câu
+    // nào. Sinh cho mọi bài làm, kể cả bài đạt.
+    await query(`ALTER TABLE atld.quiz_attempts ADD COLUMN IF NOT EXISTS download_key VARCHAR(64)`)
     await query(`
       DO $$ BEGIN
         ALTER TABLE atld.quiz_attempts ADD CONSTRAINT quiz_attempts_owner_chk

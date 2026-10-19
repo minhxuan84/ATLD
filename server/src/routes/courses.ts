@@ -1,9 +1,11 @@
 import { Router } from 'express'
 import { query } from '../db.js'
-import { requireAuth } from '../auth.js'
+import { requireAuth, requireSection } from '../auth.js'
 import { findWorkersByTraineeIdentity } from '../lib/hse-training.js'
 import { audit, clientIp, syncWorkerAccess } from '../lib/hse-core.js'
 import { traineePhotoUpload, isTraineePhotoName } from '../lib/trainee-photo.js'
+import { generateQuizPdfs } from '../lib/quiz-record.js'
+import { resolveCertPdf } from '../lib/cert-store.js'
 import crypto from 'node:crypto'
 
 export const coursesRouter = Router()
@@ -216,13 +218,15 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     ? crypto.createHash('sha256').update(idNumber.trim().toLowerCase(), 'utf8').digest('hex')
     : null
 
-  // Lưu attempt vào quiz_attempts
+  // Lưu attempt vào quiz_attempts. download_key sinh cho MỌI bài làm (kể cả trượt):
+  // trượt thì không có chứng nhận, nhưng vẫn phải tải được bài làm để biết sai câu nào.
+  const attemptKey = crypto.randomBytes(32).toString('hex')
   const attemptRes = await query<{ id: number }>(
     `INSERT INTO atld.quiz_attempts (user_id, course_id, question_ids, answers, score, passed,
-      trainee_info, trainee_key, submitted_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) RETURNING id`,
+      trainee_info, trainee_key, download_key, submitted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now()) RETURNING id`,
     [req.user!.id, courseId, JSON.stringify(questionIds || []), JSON.stringify(answers),
-     score, passed, JSON.stringify(traineeInfo), traineeKey],
+     score, passed, JSON.stringify(traineeInfo), traineeKey, attemptKey],
   )
   const attemptId = attemptRes.rows[0].id
 
@@ -276,14 +280,21 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     }
   }
 
-  // ── Pha H3: ghi chứng nhận vào danh mục cho cán bộ tra cứu hồ sơ ──────────
-  if (passed) {
-    const photoField = fieldRows.rows.find((f) => f.purpose === 'photo')
-    const photoStoredName = photoField ? (traineeInfo[photoField.field_key] ?? null) : null
-    const nameField = fieldRows.rows.find((f) => f.purpose === 'full_name')
-    const traineeName = nameField ? traineeInfo[nameField.field_key] : req.user!.fullName
-    const downloadKey = crypto.randomBytes(32).toString('hex')
+  // ── Pha H3/H4: tên và ảnh trên chứng nhận lấy theo VAI TRÒ của trường ─────
+  // Tên: chỉ trường purpose='full_name'. Không có trường nào được đánh dấu thì mới
+  // rơi về tên tài khoản — đường này chỉ có ở lối vào có đăng nhập, học viên quét QR
+  // bắt buộc phải khai (xem portal.ts).
+  const photoField = fieldRows.rows.find((f) => f.purpose === 'photo')
+  const photoStoredName = photoField ? (traineeInfo[photoField.field_key] ?? null) : null
+  const nameField = fieldRows.rows.find((f) => f.purpose === 'full_name')
+  const traineeName = (nameField ? traineeInfo[nameField.field_key] : '') || req.user!.fullName
 
+  // ── Pha H3: ghi chứng nhận vào danh mục cho cán bộ tra cứu hồ sơ ──────────
+  // download_key 32 byte: cert_id có Date.now() trong đó nên đoán được, không dùng
+  // một mình làm cửa tải file.
+  let downloadKey: string | null = null
+  if (passed) {
+    downloadKey = crypto.randomBytes(32).toString('hex')
     await query(
       `INSERT INTO atld.quiz_certificates
         (cert_id, course_id, attempt_id, user_id, trainee_name, trainee_info, photo_stored_name,
@@ -294,8 +305,18 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     )
   }
 
-  // Tên trên chứng chỉ ưu tiên họ tên khai báo, không có thì dùng tên tài khoản
-  const traineeName = traineeInfo.full_name || req.user!.fullName
+  // ── Pha H5: sinh 2 PDF. generateQuizPdfs tự bọc try/catch từng PDF — lỗi ghi
+  // file không được làm học viên mất kết quả vừa chấm, tải lại sau vẫn được.
+  const pdfs = await generateQuizPdfs({
+    attemptId, certId, courseId, courseTitle: course.title,
+    traineeName, traineeInfo,
+    fieldLabels: Object.fromEntries(fieldRows.rows.map((f) => [f.field_key, f.label])),
+    photoFieldKey: photoField?.field_key ?? null,
+    photoStoredName,
+    score, passed, passScore, expiresAt,
+    questionIds: questionIds ?? [],
+    answers,
+  })
 
   res.json({
     score,
@@ -304,6 +325,9 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
     attempts_used: used + 1,
     max_attempts: maxAttempts,
     attempts_left: attemptsLeft,
+    attempt_pdf: pdfs.detailPdf
+      ? `/api/courses/attempts/${attemptId}/pdf?k=${attemptKey}`
+      : null,
     certificate: passed
       ? {
           certId,
@@ -312,6 +336,9 @@ coursesRouter.post('/:id/submit', requireAuth, async (req, res) => {
           score,
           date: new Date().toLocaleDateString('vi-VN'),
           expiresAt,
+          pdf_url: pdfs.certPdf
+            ? `/api/courses/certificates/${encodeURIComponent(certId!)}/pdf?k=${downloadKey}`
+            : null,
         }
       : null,
   })
@@ -328,4 +355,80 @@ coursesRouter.get('/:id/attempts', requireAuth, async (req, res) => {
     [req.user!.id, req.params.id],
   )
   res.json({ attempts: attempts.rows })
+})
+
+// ── Pha H5: phục vụ PDF bài làm và chứng nhận ─────────────────────────────
+// Hai cửa cho cùng một file:
+//   1. `?k=<download_key>` — học viên vừa thi xong, kể cả đường QR không có tài khoản.
+//   2. JWT + requireSection('khoa-hoc') — cán bộ đào tạo tải lại bất cứ lúc nào.
+// Một thông điệp lỗi duy nhất cho cả "không có bản ghi" và "khóa sai" (như BAD_TOKEN
+// của portal.ts): cert_id đoán được, đừng để nó thành cách dò xem mã nào có thật.
+const BAD_KEY = 'Liên kết tải tệp không hợp lệ hoặc đã hết hiệu lực.'
+
+/** So khóa tải bằng timingSafeEqual — không so bằng `===` trên giá trị bí mật. */
+function keyMatches(provided: unknown, expected: string | null | undefined): boolean {
+  const a = String(provided ?? '')
+  if (!expected || a.length !== expected.length) return false
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(expected))
+}
+
+/** Gác cửa thứ hai: JWT hợp lệ + quyền mục khóa học. Tự trả 401/403 khi không đạt. */
+function staffGate(req: Parameters<typeof requireAuth>[0], res: Parameters<typeof requireAuth>[1], ok: () => void) {
+  requireAuth(req, res, () => requireSection('khoa-hoc')(req, res, ok))
+}
+
+/** Gửi file PDF sau khi kiểm lại đường dẫn nằm trong CERT_DIR. */
+function sendCertPdf(res: Parameters<typeof requireAuth>[1], storedName: unknown, downloadName: string) {
+  const filePath = resolveCertPdf(storedName)
+  if (!filePath) {
+    return res.status(404).json({ error: 'Tệp PDF chưa được tạo hoặc không còn trên hệ thống.' })
+  }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`)
+  res.sendFile(filePath)
+}
+
+coursesRouter.get('/certificates/:certId/pdf', async (req, res) => {
+  const { rows } = await query<{ cert_pdf: string | null; download_key: string; cert_id: string }>(
+    'SELECT cert_pdf, download_key, cert_id FROM atld.quiz_certificates WHERE cert_id = $1',
+    [req.params.certId],
+  )
+  const cert = rows[0]
+
+  // Có gửi `k` thì chỉ xét `k`: sai là 403 ngay, không rơi về cửa cán bộ (gửi `k` sai
+  // kèm JWT hợp lệ vẫn vào được qua cửa 2 — nhưng phải bỏ `k` ra, để lỗi nói đúng việc).
+  if (req.query.k !== undefined) {
+    if (!cert || !keyMatches(req.query.k, cert.download_key)) {
+      return res.status(403).json({ error: BAD_KEY })
+    }
+    return sendCertPdf(res, cert.cert_pdf, `chung-nhan-${cert.cert_id}.pdf`)
+  }
+
+  staffGate(req, res, () => {
+    if (!cert) return res.status(404).json({ error: 'Không tìm thấy chứng nhận.' })
+    sendCertPdf(res, cert.cert_pdf, `chung-nhan-${cert.cert_id}.pdf`)
+  })
+})
+
+coursesRouter.get('/attempts/:id/pdf', async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id < 1) return res.status(403).json({ error: BAD_KEY })
+
+  const { rows } = await query<{ detail_pdf: string | null; download_key: string | null }>(
+    'SELECT detail_pdf, download_key FROM atld.quiz_attempts WHERE id = $1',
+    [id],
+  )
+  const attempt = rows[0]
+
+  if (req.query.k !== undefined) {
+    if (!attempt || !keyMatches(req.query.k, attempt.download_key)) {
+      return res.status(403).json({ error: BAD_KEY })
+    }
+    return sendCertPdf(res, attempt.detail_pdf, `bai-lam-${id}.pdf`)
+  }
+
+  staffGate(req, res, () => {
+    if (!attempt) return res.status(404).json({ error: 'Không tìm thấy bài làm.' })
+    sendCertPdf(res, attempt.detail_pdf, `bai-lam-${id}.pdf`)
+  })
 })
