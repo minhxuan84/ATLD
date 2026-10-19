@@ -13,7 +13,7 @@ import { hseRouter } from './routes/hse.js'
 import { findingsRouter } from './routes/findings.js'
 import { portalRouter } from './routes/portal.js'
 import { jsaRouter } from './routes/jsa.js'
-import { newsRouter } from './routes/news.js'
+import { newsRouter, newsSourcesRouter } from './routes/news.js'
 import { adminRouter } from './routes/admin.js'
 import { configRouter } from './routes/config.js'
 import { mediaRouter } from './routes/media.js'
@@ -67,6 +67,7 @@ app.use('/api/findings', findingsRouter)
 app.use('/api/portal', portalRouter)
 app.use('/api/jsa', jsaRouter)
 app.use('/api/news', newsRouter)
+app.use('/api/news-sources', newsSourcesRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/config', configRouter)
 app.use('/api/media', mediaRouter)
@@ -113,4 +114,7 @@ app.listen(port, async () => {
     console.warn('[atld-oauth] Migration warning:', (e as Error).message)
   }
   console.log(`[atld-api] Máy chủ chạy tại http://localhost:${port}`)
+  // Khởi động bộ lấy tin RSS sau khi server đã sẵn sàng
+  const { startNewsFetcher } = await import('./lib/newsFetch.js')
+  startNewsFetcher()
 })

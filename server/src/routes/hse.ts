@@ -1073,6 +1073,63 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
       ON atld.quiz_certificates(course_id, issued_at DESC)`)
     await query(`CREATE INDEX IF NOT EXISTS idx_quiz_certificates_user
       ON atld.quiz_certificates(user_id) WHERE user_id IS NOT NULL`)
+
+    // ── Pha H6: link QR cho từng bài kiểm tra ──
+    // Dùng lại hse_portal_tokens thay vì dựng cơ chế token thứ hai: hash SHA-256,
+    // expires_at, max_uses, revoked_at, rate limit và thông điệp lỗi chung đã có sẵn.
+    // CHECK phải NỚI chứ không thêm mới: DB đang chạy đã có constraint với danh sách
+    // cũ, chỉ ADD thì rơi vào EXCEPTION duplicate_object và 'quiz' vẫn bị chặn.
+    await query(`ALTER TABLE atld.hse_portal_tokens
+      DROP CONSTRAINT IF EXISTS hse_portal_tokens_purpose_chk`)
+    await query(`ALTER TABLE atld.hse_portal_tokens
+      ADD CONSTRAINT hse_portal_tokens_purpose_chk
+      CHECK (purpose IN ('worker_declare','field_report','capa_response','quiz'))`)
+    await query(`ALTER TABLE atld.hse_portal_tokens ADD COLUMN IF NOT EXISTS
+      course_id VARCHAR(60) REFERENCES atld.courses(id) ON DELETE CASCADE`)
+    // Mỗi link QR gắn đúng một khóa học; thiếu course_id thì không biết phát đề nào.
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.hse_portal_tokens ADD CONSTRAINT hse_portal_tokens_quiz_chk
+          CHECK (purpose <> 'quiz' OR course_id IS NOT NULL);
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+
+    // ──── Pha I: nguồn RSS + cột additive trên atld.news ────
+    await query(`
+      CREATE TABLE IF NOT EXISTS atld.news_sources (
+        id               SERIAL PRIMARY KEY,
+        name             VARCHAR(120) NOT NULL,
+        url              VARCHAR(500) NOT NULL,
+        enabled          BOOLEAN NOT NULL DEFAULT true,
+        interval_minutes INTEGER NOT NULL DEFAULT 180,
+        category         VARCHAR(60),
+        last_fetched_at  TIMESTAMPTZ,
+        last_status      VARCHAR(20),
+        last_error       TEXT,
+        created_by       INTEGER REFERENCES atld.users(id) ON DELETE SET NULL,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`)
+    // status mặc định 'published' → tin đang có vẫn hiện bình thường sau deploy.
+    // Tin RSS tự lấy ghi 'draft', phải duyệt tay mới lên trang chủ.
+    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_id INTEGER REFERENCES atld.news_sources(id) ON DELETE SET NULL`)
+    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_url VARCHAR(500)`)
+    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_name VARCHAR(120)`)
+    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMPTZ`)
+    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'published'`)
+    // Backfill tin cũ (cột mới có default 'published' nhưng vẫn rà lại cho chắc)
+    await query(`UPDATE atld.news SET status = 'published' WHERE status IS NULL OR status = ''`)
+    // UNIQUE source_url: NULL không bị chặn → tin gõ tay không ảnh hưởng, chỉ chống trùng RSS
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.news ADD CONSTRAINT news_source_url_unique UNIQUE (source_url);
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`
+      DO $$ BEGIN
+        ALTER TABLE atld.news ADD CONSTRAINT news_status_chk
+          CHECK (status IN ('published', 'draft'));
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_news_status ON atld.news(status)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_news_source ON atld.news(source_id)`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_news_sources_enabled ON atld.news_sources(enabled)`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }

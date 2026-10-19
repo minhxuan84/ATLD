@@ -819,3 +819,16 @@ adminRouter.post('/videos/create', requireSection('khoa-hoc'), async (req, res) 
     res.status(500).json({ error: 'Không thể khởi động job tạo video.' })
   }
 })
+
+// ---- Xem trước bản nháp tin RSS (cho NewsManager DraftPreview) ----
+// Chỉ trả về nội dung, không cần status='published' — cán bộ cần đọc để quyết định duyệt.
+adminRouter.get('/news/:id/preview', requireSection('tin-tuc'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT id, title, category, content, author,
+            to_char(created_at, 'YYYY-MM-DD') AS date
+     FROM atld.news WHERE id = $1`,
+    [req.params.id],
+  )
+  if (!rows[0]) return res.status(404).json({ error: 'Không tìm thấy tin.' })
+  res.json({ item: rows[0] })
+})
