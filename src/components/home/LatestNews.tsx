@@ -1,9 +1,9 @@
 import { Link } from 'react-router-dom'
 import { Card, Badge } from '../ui'
 
-const COLOR: Record<string, 'vicem' | 'hatien' | 'red'> = {
+const COLOR: Record<string, 'vicem' | 'eco' | 'red'> = {
   'Thông báo': 'vicem',
-  'Sự kiện': 'hatien',
+  'Sự kiện': 'eco',
   'Cảnh báo an toàn': 'red',
 }
 

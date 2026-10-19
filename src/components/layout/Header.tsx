@@ -66,7 +66,7 @@ export default function Header() {
           {user ? (
             <>
               {hasCmsAccess(user) && (
-                <NavLink to="/cms" className="inline-flex items-center gap-1.5 rounded-lg bg-hatien-500 px-3 py-1.5 font-semibold text-white hover:bg-hatien-600">
+                <NavLink to="/cms" className="inline-flex items-center gap-1.5 rounded-lg bg-eco-600 px-3 py-1.5 font-semibold text-white hover:bg-eco-700">
                   <Settings className="h-4 w-4" /> <span className="hidden sm:inline">CMS</span>
                 </NavLink>
               )}

@@ -8,9 +8,11 @@ export function Card({ children, className = '', hover = false }: { children: Re
   )
 }
 
-export function Badge({ children, color = 'vicem' }: { children: ReactNode; color?: 'vicem' | 'hatien' | 'green' | 'red' | 'slate' | 'safety' }) {
+// 'hatien' (đỏ) giữ lại cho nhận diện thương hiệu; chip/nhãn thường dùng 'eco'.
+export function Badge({ children, color = 'vicem' }: { children: ReactNode; color?: 'vicem' | 'eco' | 'hatien' | 'green' | 'red' | 'slate' | 'safety' }) {
   const map = {
     vicem: 'bg-vicem-100 text-vicem-700',
+    eco: 'bg-eco-100 text-eco-700',
     hatien: 'bg-hatien-100 text-hatien-700',
     safety: 'bg-amber-100 text-amber-700',
     green: 'bg-emerald-100 text-emerald-700',

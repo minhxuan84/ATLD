@@ -213,7 +213,7 @@ export default function TrainingDetailPage() {
                   {quizFields.map((f) => (
                     <div key={f.field_key}>
                       <label className="block text-sm font-medium text-slate-700">
-                        {f.label} {f.required && <span className="text-hatien-500">*</span>}
+                        {f.label} {f.required && <span className="text-eco-600">*</span>}
                       </label>
                       {f.type === 'select' ? (
                         <select
@@ -318,7 +318,7 @@ export default function TrainingDetailPage() {
                     <button
                       onClick={submitQuiz}
                       disabled={!allAnswered || outOfAttempts}
-                      className={`rounded-lg px-5 py-2.5 font-semibold text-white ${allAnswered && !outOfAttempts ? 'bg-hatien-500 hover:bg-hatien-600' : 'cursor-not-allowed bg-slate-300'}`}
+                      className={`rounded-lg px-5 py-2.5 font-semibold text-white ${allAnswered && !outOfAttempts ? 'bg-eco-600 hover:bg-eco-700' : 'cursor-not-allowed bg-slate-300'}`}
                     >
                       Nộp bài &amp; chấm điểm
                     </button>

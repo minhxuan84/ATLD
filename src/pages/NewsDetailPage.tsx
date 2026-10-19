@@ -4,9 +4,9 @@ import { api } from '../lib/api'
 import { Badge } from '../components/ui'
 import { ArrowLeft } from 'lucide-react'
 
-const COLOR: Record<string, 'vicem' | 'hatien' | 'red'> = {
+const COLOR: Record<string, 'vicem' | 'eco' | 'red'> = {
   'Thông báo': 'vicem',
-  'Sự kiện': 'hatien',
+  'Sự kiện': 'eco',
   'Cảnh báo an toàn': 'red',
 }
 

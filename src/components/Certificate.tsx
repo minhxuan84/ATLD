@@ -44,7 +44,7 @@ export default function Certificate({ data }: { data: CertData }) {
       </div>
 
       <div className="mt-5 rounded-2xl border-4 border-double border-vicem-500 bg-white p-8 text-center" id="certificate">
-        <div className="flex items-center justify-center gap-2 text-hatien-600">
+        <div className="flex items-center justify-center gap-2 text-eco-600">
           <Award className="h-10 w-10" aria-hidden />
         </div>
         <p className="mt-2 text-sm font-bold uppercase tracking-widest text-vicem-500">VICEM Hà Tiên</p>

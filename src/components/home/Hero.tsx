@@ -1,3 +1,7 @@
+// KHÔNG CÒN ĐƯỢC DÙNG: trang chủ hiện là HomePage.tsx với layout fullpage, dựng
+// hero/giới thiệu ngay trong file đó. Component này không được import ở đâu (grep
+// 'Hero' toàn src chỉ ra chính nó). Giữ lại để đối chiếu, đổi màu theo tông xanh cho
+// nhất quán — nếu sau một thời gian vẫn không dùng thì xóa cả Hero.tsx và About.tsx.
 import { Link } from 'react-router-dom'
 import { ShieldCheck, PlayCircle, Award, Users, FileCheck } from 'lucide-react'
 
@@ -11,7 +15,7 @@ export default function Hero() {
   return (
     <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-vicem-800 via-vicem-600 to-vicem-500 text-white shadow-xl">
       {/* Khối trang trí động */}
-      <div className="pointer-events-none absolute -right-16 -top-16 h-64 w-64 rounded-full bg-hatien-500/20 blur-2xl animate-float-slow" aria-hidden />
+      <div className="pointer-events-none absolute -right-16 -top-16 h-64 w-64 rounded-full bg-eco-500/20 blur-2xl animate-float-slow" aria-hidden />
       <div className="pointer-events-none absolute -bottom-20 left-1/3 h-56 w-56 rounded-full bg-white/10 blur-2xl" aria-hidden />
 
       <div className="relative grid items-center gap-6 px-6 py-14 md:grid-cols-2 md:px-12 md:py-20">
@@ -20,7 +24,7 @@ export default function Hero() {
             <ShieldCheck className="h-4 w-4" aria-hidden /> An toàn là trên hết
           </span>
           <h1 className="mt-4 text-3xl font-extrabold leading-tight md:text-5xl">
-            Huấn luyện <span className="text-hatien-100">An toàn lao động</span> &amp; Bảo vệ môi trường
+            Huấn luyện <span className="text-eco-100">An toàn lao động</span> &amp; Bảo vệ môi trường
           </h1>
           <p className="mt-4 max-w-xl text-vicem-50/90">
             VICEM Hà Tiên số hóa công tác huấn luyện: học qua video, nắm nội dung cốt lõi, làm trắc nghiệm và nhận chứng chỉ — mọi lúc, mọi nơi.
@@ -28,7 +32,7 @@ export default function Hero() {
           <div className="mt-7 flex flex-wrap gap-3">
             <Link
               to="/huan-luyen"
-              className="group inline-flex items-center gap-2 rounded-xl bg-hatien-500 px-6 py-3 font-semibold text-white shadow-lg shadow-hatien-500/30 transition hover:bg-hatien-600 hover:shadow-hatien-500/50"
+              className="group inline-flex items-center gap-2 rounded-xl bg-eco-600 px-6 py-3 font-semibold text-white shadow-lg shadow-eco-500/30 transition hover:bg-eco-700 hover:shadow-eco-500/50"
             >
               <PlayCircle className="h-5 w-5 transition group-hover:scale-110" aria-hidden /> Bắt đầu huấn luyện
             </Link>

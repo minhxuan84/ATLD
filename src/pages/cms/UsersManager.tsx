@@ -156,7 +156,7 @@ export default function UsersManager() {
                 <td className="px-4 py-3 font-medium text-slate-700">{u.username}{me?.id === u.id && <span className="ml-2 text-xs text-vicem-500">(bạn)</span>}</td>
                 <td className="px-4 py-3 text-slate-600">{u.full_name}</td>
                 <td className="px-4 py-3">
-                  <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${u.role === 'admin' ? 'bg-hatien-100 text-hatien-700' : u.role === 'officer' ? 'bg-vicem-100 text-vicem-700' : 'bg-slate-100 text-slate-600'}`}>
+                  <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${u.role === 'admin' ? 'bg-eco-100 text-eco-700' : u.role === 'officer' ? 'bg-vicem-100 text-vicem-700' : 'bg-slate-100 text-slate-600'}`}>
                     {ROLE_LABEL[u.role]}
                   </span>
                   {u.role === 'officer' && (

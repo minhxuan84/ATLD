@@ -17,7 +17,7 @@ export default function Goals({ goals }: Props) {
                 <Target className="h-5 w-5 text-vicem-500" aria-hidden />
                 <h3 className="font-semibold text-slate-800">{g.title}</h3>
               </div>
-              <Badge color={g.scope === 'year' ? 'vicem' : 'hatien'}>
+              <Badge color={g.scope === 'year' ? 'vicem' : 'eco'}>
                 {g.scope === 'year' ? 'Năm' : 'Tháng'}
               </Badge>
             </div>

@@ -97,7 +97,7 @@ export default function QuizFieldsManager() {
                 <div className="min-w-0 flex-1">
                   <p className="font-medium text-slate-800">
                     {f.label}
-                    {f.required && <span className="ml-1 text-hatien-500">*</span>}
+                    {f.required && <span className="ml-1 text-eco-600">*</span>}
                   </p>
                   <p className="text-xs text-slate-400">
                     <code className="rounded bg-slate-100 px-1">{f.field_key}</code> · {f.type === 'select' ? `Chọn: ${f.options.join(', ')}` : 'Nhập tự do'}

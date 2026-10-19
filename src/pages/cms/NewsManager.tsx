@@ -6,7 +6,7 @@ import { Plus, Trash2, Pencil, X, Check } from 'lucide-react'
 const CATEGORIES = ['Thông báo', 'Sự kiện', 'Cảnh báo an toàn']
 const CAT_COLOR: Record<string, string> = {
   'Thông báo': 'bg-vicem-100 text-vicem-700',
-  'Sự kiện': 'bg-hatien-100 text-hatien-700',
+  'Sự kiện': 'bg-eco-100 text-eco-700',
   'Cảnh báo an toàn': 'bg-amber-100 text-amber-700',
 }
 

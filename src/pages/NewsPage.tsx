@@ -6,9 +6,9 @@ import { Card, Badge } from '../components/ui'
 import { Plus, Trash2 } from 'lucide-react'
 
 const CATEGORIES = ['Thông báo', 'Sự kiện', 'Cảnh báo an toàn']
-const COLOR: Record<string, 'vicem' | 'hatien' | 'red'> = {
+const COLOR: Record<string, 'vicem' | 'eco' | 'red'> = {
   'Thông báo': 'vicem',
-  'Sự kiện': 'hatien',
+  'Sự kiện': 'eco',
   'Cảnh báo an toàn': 'red',
 }
 

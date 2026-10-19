@@ -23,7 +23,7 @@ export default function Dashboard() {
     { label: 'Người dùng', value: stats.totals.users, icon: Users, grad: 'from-vicem-500 to-vicem-700' },
     { label: 'Khóa học', value: stats.totals.courses, icon: GraduationCap, grad: 'from-emerald-500 to-emerald-700' },
     { label: 'Tài liệu', value: stats.totals.documents, icon: FileText, grad: 'from-amber-500 to-amber-600' },
-    { label: 'Tin tức', value: stats.totals.news, icon: Newspaper, grad: 'from-hatien-500 to-hatien-700' },
+    { label: 'Tin tức', value: stats.totals.news, icon: Newspaper, grad: 'from-eco-500 to-eco-700' },
     { label: 'Chứng chỉ đã cấp', value: stats.totals.certificates, icon: Award, grad: 'from-purple-500 to-purple-700' },
   ]
 
