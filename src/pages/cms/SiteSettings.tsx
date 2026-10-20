@@ -3,8 +3,8 @@ import { api } from '../../lib/api'
 import { useConfig } from '../../context/ConfigContext'
 import Logo from '../../components/Logo'
 import ImageUpload from './ImageUpload'
-import { FIELD_ICONS } from '../../lib/fieldIcons'
-import { Save, Check } from 'lucide-react'
+import { FIELD_ICONS, MAX_FIELD_CARDS, readFieldCards, type FieldCard } from '../../lib/fieldIcons'
+import { Save, Check, Plus, Trash2, ArrowUp, ArrowDown } from 'lucide-react'
 
 // Nhóm các trường cấu hình để hiển thị theo khu vực
 const GROUPS: { title: string; fields: { key: string; label: string; multiline?: boolean }[] }[] = [
@@ -46,13 +46,37 @@ export default function SiteSettings() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
 
-  useEffect(() => { setForm(config) }, [config])
+  // Thẻ "Lĩnh vực hoạt động" giữ riêng dạng mảng; khi lưu mới ghép vào fields_cards.
+  const [cards, setCards] = useState<FieldCard[]>([])
+
+  useEffect(() => {
+    setForm(config)
+    setCards(readFieldCards(config))
+  }, [config])
+
+  const updateCard = (i: number, patch: Partial<FieldCard>) =>
+    setCards((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)))
+  const addCard = () =>
+    setCards((cs) => (cs.length >= MAX_FIELD_CARDS ? cs : [...cs, { title: '', desc: '', link: '', icon: '' }]))
+  const removeCard = (i: number) => {
+    const c = cards[i]
+    if (c.title.trim() && !confirm(`Xóa thẻ "${c.title}"?`)) return
+    setCards((cs) => (cs.length <= 1 ? cs : cs.filter((_, j) => j !== i)))
+  }
+  const moveCard = (i: number, d: -1 | 1) =>
+    setCards((cs) => {
+      const j = i + d
+      if (j < 0 || j >= cs.length) return cs
+      const next = [...cs]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(''); setSaved(false)
     try {
-      await api('/config', { method: 'PUT', body: form })
+      await api('/config', { method: 'PUT', body: { ...form, fields_cards: JSON.stringify(cards) } })
       reload()
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
@@ -156,8 +180,8 @@ export default function SiteSettings() {
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
           <h2 className="font-semibold text-slate-800">Lĩnh vực hoạt động (trang chủ)</h2>
           <p className="text-sm text-slate-500">
-            Khu 4 thẻ giới thiệu các mảng hoạt động. Ô nào để trống sẽ dùng lại nội dung mặc định,
-            nên không bao giờ ra thẻ rỗng. Đường dẫn phải là đường dẫn trong hệ thống, bắt đầu bằng
+            Các thẻ giới thiệu mảng hoạt động (1–{MAX_FIELD_CARDS} thẻ, thêm/bớt/sắp xếp được).
+            Mỗi thẻ cần tiêu đề. Đường dẫn phải là đường dẫn trong hệ thống, bắt đầu bằng
             <b> /</b> (vd: <code className="rounded bg-slate-100 px-1">/huan-luyen</code>).
           </p>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -181,18 +205,36 @@ export default function SiteSettings() {
             </div>
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            {[1, 2, 3, 4].map((n) => {
-              const iconKey = form[`field_${n}_icon`] ?? ''
-              const Preview = iconKey ? FIELD_ICONS[iconKey]?.icon : undefined
+            {cards.map((c, i) => {
+              const Preview = c.icon ? FIELD_ICONS[c.icon]?.icon : undefined
               return (
-                <div key={n} className="rounded-xl border border-slate-200 p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Thẻ {n}</p>
+                <div key={i} className="rounded-xl border border-slate-200 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Thẻ {i + 1}</p>
+                    <div className="flex items-center gap-1">
+                      <button type="button" onClick={() => moveCard(i, -1)} disabled={i === 0}
+                        aria-label={`Đưa thẻ ${i + 1} lên trước`} title="Lên trước"
+                        className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-30">
+                        <ArrowUp className="h-4 w-4" />
+                      </button>
+                      <button type="button" onClick={() => moveCard(i, 1)} disabled={i === cards.length - 1}
+                        aria-label={`Đưa thẻ ${i + 1} ra sau`} title="Ra sau"
+                        className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-30">
+                        <ArrowDown className="h-4 w-4" />
+                      </button>
+                      <button type="button" onClick={() => removeCard(i)} disabled={cards.length <= 1}
+                        aria-label={`Xóa thẻ ${i + 1}`} title={cards.length <= 1 ? 'Cần giữ ít nhất 1 thẻ' : 'Xóa thẻ'}
+                        className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30">
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
                   <div className="mt-2 space-y-2">
                     <div>
-                      <label className="block text-xs text-slate-500">Tiêu đề</label>
+                      <label className="block text-xs text-slate-500">Tiêu đề <span className="text-red-500">*</span></label>
                       <input
-                        value={form[`field_${n}_title`] ?? ''} maxLength={80}
-                        onChange={(e) => setForm({ ...form, [`field_${n}_title`]: e.target.value })}
+                        value={c.title} maxLength={80} required
+                        onChange={(e) => updateCard(i, { title: e.target.value })}
                         placeholder="Huấn luyện ATLĐ"
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                       />
@@ -200,8 +242,8 @@ export default function SiteSettings() {
                     <div>
                       <label className="block text-xs text-slate-500">Mô tả</label>
                       <textarea
-                        value={form[`field_${n}_desc`] ?? ''} maxLength={300} rows={3}
-                        onChange={(e) => setForm({ ...form, [`field_${n}_desc`]: e.target.value })}
+                        value={c.desc} maxLength={300} rows={3}
+                        onChange={(e) => updateCard(i, { desc: e.target.value })}
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                       />
                     </div>
@@ -209,8 +251,8 @@ export default function SiteSettings() {
                       <div>
                         <label className="block text-xs text-slate-500">Đường dẫn</label>
                         <input
-                          value={form[`field_${n}_link`] ?? ''} maxLength={120}
-                          onChange={(e) => setForm({ ...form, [`field_${n}_link`]: e.target.value })}
+                          value={c.link} maxLength={120}
+                          onChange={(e) => updateCard(i, { link: e.target.value })}
                           placeholder="/huan-luyen"
                           className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                         />
@@ -219,8 +261,8 @@ export default function SiteSettings() {
                         <label className="block text-xs text-slate-500">Biểu tượng</label>
                         <div className="mt-1 flex items-center gap-2">
                           <select
-                            value={iconKey}
-                            onChange={(e) => setForm({ ...form, [`field_${n}_icon`]: e.target.value })}
+                            value={c.icon}
+                            onChange={(e) => updateCard(i, { icon: e.target.value })}
                             className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
                           >
                             <option value="">— Mặc định —</option>
@@ -240,6 +282,13 @@ export default function SiteSettings() {
                 </div>
               )
             })}
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <button type="button" onClick={addCard} disabled={cards.length >= MAX_FIELD_CARDS}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:border-vicem-400 hover:text-vicem-700 disabled:opacity-40">
+              <Plus className="h-4 w-4" /> Thêm thẻ
+            </button>
+            <span className="text-xs text-slate-400">{cards.length}/{MAX_FIELD_CARDS} thẻ</span>
           </div>
         </div>
 

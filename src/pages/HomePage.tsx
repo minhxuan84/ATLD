@@ -6,9 +6,9 @@ import { useReveal } from '../hooks/useReveal'
 import { useConfig } from '../context/ConfigContext'
 import LandingHeader from '../components/home/LandingHeader'
 import CountUp from '../components/CountUp'
-import { FIELD_COLORS, resolveFieldIcon } from '../lib/fieldIcons'
+import { FIELD_COLORS, resolveFieldIcon, readFieldCards } from '../lib/fieldIcons'
 import {
-  ShieldCheck, PlayCircle, ChevronDown, GraduationCap, FileText, Newspaper, Leaf,
+  ShieldCheck, PlayCircle, ChevronDown, Leaf,
   Award, Users, FileCheck, Target, ArrowRight, MapPin, Mail, Phone,
 } from 'lucide-react'
 
@@ -33,16 +33,6 @@ const SECTIONS = [
   { id: 'nang-luc', label: 'Năng lực' },
   { id: 'tin-tuc', label: 'Tin tức' },
   { id: 'lien-he', label: 'Liên hệ' },
-]
-
-// Nội dung mặc định cho 4 thẻ "Lĩnh vực hoạt động". CMS ghi đè được từng ô trong
-// "Trang tĩnh & Nhận diện"; ô nào để trống thì lấy lại giá trị ở đây — cùng cách
-// HERO_FALLBACK đang làm với ảnh banner, để trang chủ không bao giờ ra thẻ rỗng.
-const FIELDS = [
-  { icon: GraduationCap, title: 'Huấn luyện ATLĐ', desc: 'Học qua video, tóm tắt nội dung, trắc nghiệm và cấp chứng chỉ trực tuyến theo 6 nhóm đối tượng.', to: '/huan-luyen', color: FIELD_COLORS[0] },
-  { icon: FileText, title: 'Tài liệu hồ sơ', desc: 'Lưu trữ, phân quyền và tìm kiếm tài liệu, hồ sơ an toàn lao động và môi trường.', to: '/tai-lieu', color: FIELD_COLORS[1] },
-  { icon: Leaf, title: 'Bảo vệ môi trường', desc: 'Quản lý chất thải, quan trắc môi trường định kỳ, kiểm soát bụi và khí thải trong sản xuất.', to: '/huan-luyen', color: FIELD_COLORS[2] },
-  { icon: Newspaper, title: 'Tin tức & Thông báo', desc: 'Cập nhật sự kiện, cảnh báo an toàn và thông báo mới nhất của VICEM Hà Tiên.', to: '/tin-tuc', color: FIELD_COLORS[3] },
 ]
 
 // Icon cố định cho 4 chỉ số; giá trị & nhãn lấy từ cấu hình (CMS chỉnh được).
@@ -88,18 +78,16 @@ export default function HomePage() {
     ...parseStat(config[`stat_${i + 1}_value`] ?? ''),
   }))
 
-  // Thẻ "Lĩnh vực hoạt động": từng ô lấy từ CMS, trống thì về mặc định trong FIELDS.
-  // Đường dẫn đã được server kiểm là đường dẫn nội bộ trước khi lưu (xem config.ts).
-  const fields = FIELDS.map((d, i) => {
-    const n = i + 1
-    return {
-      title: config[`field_${n}_title`]?.trim() || d.title,
-      desc: config[`field_${n}_desc`]?.trim() || d.desc,
-      to: config[`field_${n}_link`]?.trim() || d.to,
-      icon: resolveFieldIcon(config[`field_${n}_icon`]?.trim(), d.icon),
-      color: d.color,
-    }
-  })
+  // Thẻ "Lĩnh vực hoạt động": danh sách thêm/bớt được trong CMS (xem readFieldCards).
+  // Đường dẫn đã được server kiểm là đường dẫn nội bộ trước khi lưu (xem config.ts);
+  // thiếu đường dẫn thì về trang chủ thay vì ra <Link to=""> hỏng.
+  const fields = readFieldCards(config).map((c, i) => ({
+    title: c.title,
+    desc: c.desc,
+    to: c.link || '/',
+    icon: resolveFieldIcon(c.icon, Leaf),
+    color: FIELD_COLORS[i % FIELD_COLORS.length],
+  }))
 
   useEffect(() => {
     api<HomeData>('/home').then(setData).catch(() => {})
@@ -277,7 +265,13 @@ export default function HomePage() {
                 {config.fields_heading?.trim() || 'Các chức năng chính của hệ thống'}
               </h2>
             </div>
-            <div className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            {/* Số cột theo số thẻ (tối đa 4/hàng) để 1–3 thẻ vẫn cân giữa, không lệch trái. */}
+            <div className={`mt-12 grid gap-6 ${
+              ({
+                1: 'mx-auto max-w-sm',
+                2: 'mx-auto max-w-3xl sm:grid-cols-2',
+                3: 'sm:grid-cols-2 lg:grid-cols-3',
+              } as Record<number, string>)[fields.length] ?? 'sm:grid-cols-2 lg:grid-cols-4'}`}>
               {fields.map((f, i) => {
                 const Icon = f.icon
                 return (
