@@ -149,9 +149,12 @@ export async function fetchSource(src: NewsSourceRow): Promise<{ added: number; 
   try {
     const res = await guardedFetch(src.url)
 
-    // Kiểm Content-Type
+    // Kiểm Content-Type. Nhiều máy chủ Việt Nam phục vụ RSS với text/html hoặc
+    // text/plain, nên hai loại này được nhận tạm rồi xác minh bằng nội dung bên dưới.
+    // Loại khác (ảnh, JSON, application/octet-stream…) thì từ chối ngay.
     const ct = res.headers.get('content-type') ?? ''
-    if (!/xml|rss|atom/i.test(ct)) {
+    const ctIsFeed = /xml|rss|atom/i.test(ct)
+    if (!ctIsFeed && !/^text\/(html|plain)/i.test(ct) && ct !== '') {
       throw new Error(`Content-Type không hợp lệ: ${ct}`)
     }
 
@@ -171,6 +174,15 @@ export async function fetchSource(src: NewsSourceRow): Promise<{ added: number; 
       }
     }
     const xml = Buffer.concat(chunks).toString('utf-8')
+
+    // Không tin Content-Type: kiểm phần đầu tài liệu có đúng là RSS/Atom không.
+    // Thường gặp nhất là dán link trang chủ thay vì link RSS → nhận về trang HTML.
+    const head = xml.slice(0, 2000).replace(/^﻿/, '').trimStart()
+    if (!/^(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<(rss|feed|rdf:RDF)\b/i.test(head)) {
+      throw new Error(/^<(!doctype html|html)/i.test(head)
+        ? 'Đường dẫn trả về trang web HTML, không phải RSS. Hãy dùng link RSS/feed của trang (thường có chữ rss hoặc feed).'
+        : 'Nội dung không phải RSS hoặc Atom.')
+    }
 
     const items = parseXml(xml)
     let added = 0

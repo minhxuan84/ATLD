@@ -1,4 +1,7 @@
 import 'dotenv/config'
+// Phải đứng trước mọi import router: vá Express để lỗi async đi vào error handler
+// thay vì làm sập process (nguyên nhân 502).
+import './lib/async-errors.js'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
@@ -94,12 +97,19 @@ if (isProd) {
 
 // Xử lý lỗi tập trung (gồm lỗi multer: file quá lớn / sai định dạng)
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(err.message)
-  const isMulter = err.message.includes('File too large')
-  res.status(isMulter ? 413 : 400).json({
-    error: isMulter ? `File vượt quá giới hạn cho phép.` : err.message || 'Đã xảy ra lỗi.',
-  })
+app.use((err: Error & { code?: string; type?: string }, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(`[error] ${req.method} ${req.originalUrl}:`, err)
+  if (res.headersSent) return
+  if (err.message?.includes('File too large'))
+    return res.status(413).json({ error: 'File vượt quá giới hạn cho phép.' })
+  // body-parser: JSON vượt 1MB (thường do dán ảnh base64 thẳng vào nội dung).
+  if (err.type === 'entity.too.large')
+    return res.status(413).json({ error: 'Nội dung quá lớn. Hãy chèn ảnh bằng nút tải ảnh thay vì dán trực tiếp.' })
+  // Lỗi Postgres có mã SQLSTATE 5 ký tự: không trả err.message ra ngoài vì lộ tên
+  // bảng/cột. Chi tiết đã ghi log ở trên.
+  if (typeof err.code === 'string' && /^[0-9A-Z]{5}$/.test(err.code))
+    return res.status(500).json({ error: 'Lỗi máy chủ khi lưu dữ liệu. Vui lòng thử lại hoặc báo quản trị viên.' })
+  res.status(400).json({ error: err.message || 'Đã xảy ra lỗi.' })
 })
 
 const port = Number(process.env.PORT) || 4000

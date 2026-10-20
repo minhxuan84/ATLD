@@ -92,7 +92,9 @@ newsRouter.post('/', requireAuth, requireSection('tin-tuc'), async (req, res) =>
   const { rows } = await query(
     `INSERT INTO atld.news (title, category, excerpt, content, author, status, published_at, show_author)
      VALUES ($1, $2, $3, $4, $5, 'published', COALESCE($6::date::timestamptz, now()), $7) RETURNING id`,
-    [title, category, excerpt, content, req.user!.fullName, publishDate ?? null, showAuthor],
+    // author NOT NULL: tài khoản LDAP/OAuth có thể không mang fullName trong JWT.
+    [title, category, excerpt, content, (req.user!.fullName || req.user!.username).slice(0, 150),
+     publishDate ?? null, showAuthor],
   )
   res.status(201).json({ id: rows[0].id })
 })
