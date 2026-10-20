@@ -1093,51 +1093,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
           CHECK (purpose <> 'quiz' OR course_id IS NOT NULL);
       EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
 
-    // ──── Pha I: nguồn RSS + cột additive trên atld.news ────
-    await query(`
-      CREATE TABLE IF NOT EXISTS atld.news_sources (
-        id               SERIAL PRIMARY KEY,
-        name             VARCHAR(120) NOT NULL,
-        url              VARCHAR(500) NOT NULL,
-        enabled          BOOLEAN NOT NULL DEFAULT true,
-        interval_minutes INTEGER NOT NULL DEFAULT 180,
-        category         VARCHAR(60),
-        last_fetched_at  TIMESTAMPTZ,
-        last_status      VARCHAR(20),
-        last_error       TEXT,
-        created_by       INTEGER REFERENCES atld.users(id) ON DELETE SET NULL,
-        created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-      )`)
-    // status mặc định 'published' → tin đang có vẫn hiện bình thường sau deploy.
-    // Tin RSS tự lấy ghi 'draft', phải duyệt tay mới lên trang chủ.
-    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_id INTEGER REFERENCES atld.news_sources(id) ON DELETE SET NULL`)
-    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_url VARCHAR(500)`)
-    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_name VARCHAR(120)`)
-    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMPTZ`)
-    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'published'`)
-    // Backfill tin cũ (cột mới có default 'published' nhưng vẫn rà lại cho chắc)
-    await query(`UPDATE atld.news SET status = 'published' WHERE status IS NULL OR status = ''`)
-    // UNIQUE source_url: NULL không bị chặn → tin gõ tay không ảnh hưởng, chỉ chống trùng RSS
-    await query(`
-      DO $$ BEGIN
-        ALTER TABLE atld.news ADD CONSTRAINT news_source_url_unique UNIQUE (source_url);
-      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
-    await query(`
-      DO $$ BEGIN
-        ALTER TABLE atld.news ADD CONSTRAINT news_status_chk
-          CHECK (status IN ('published', 'draft'));
-      EXCEPTION WHEN duplicate_object THEN NULL; END $$`)
-    await query(`CREATE INDEX IF NOT EXISTS idx_news_status ON atld.news(status)`)
-    await query(`CREATE INDEX IF NOT EXISTS idx_news_source ON atld.news(source_id)`)
-    await query(`CREATE INDEX IF NOT EXISTS idx_news_sources_enabled ON atld.news_sources(enabled)`)
-
-    // ──── Ngày ban hành sửa được + ẩn/hiện tác giả ────
-    // published_at tách khỏi created_at: created_at là lúc tạo bản ghi (không đổi),
-    // published_at là ngày ban hành cán bộ chọn. Backfill = created_at để tin cũ giữ ngày.
-    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ`)
-    await query(`UPDATE atld.news SET published_at = created_at WHERE published_at IS NULL`)
-    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS show_author BOOLEAN NOT NULL DEFAULT true`)
-    await query(`CREATE INDEX IF NOT EXISTS idx_news_published_at ON atld.news(published_at DESC)`)
+    // Migration của atld.news / news_sources đã chuyển sang routes/news.ts (khối riêng):
+    // để ở đây thì bất kỳ câu nào phía trên lỗi cũng làm tin tức thiếu cột.
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }

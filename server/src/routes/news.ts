@@ -7,6 +7,61 @@ import { audit, clientIp } from '../lib/hse-core.js'
 export const newsRouter = Router()
 export const newsSourcesRouter = Router()
 
+// ── MIGRATION tin tức (additive-only, schema atld) ──────
+// Tách khỏi khối migration lớn của hse.ts: ở đó chỉ cần một câu phía trên lỗi là cả
+// khối dừng, atld.news thiếu published_at/show_author và mọi lần đăng bài trả 500.
+// Mỗi câu chạy độc lập để một bước lỗi không kéo theo các bước sau.
+const NEWS_MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS atld.news_sources (
+     id               SERIAL PRIMARY KEY,
+     name             VARCHAR(120) NOT NULL,
+     url              VARCHAR(500) NOT NULL,
+     enabled          BOOLEAN NOT NULL DEFAULT true,
+     interval_minutes INTEGER NOT NULL DEFAULT 180,
+     category         VARCHAR(60),
+     last_fetched_at  TIMESTAMPTZ,
+     last_status      VARCHAR(20),
+     last_error       TEXT,
+     created_by       INTEGER REFERENCES atld.users(id) ON DELETE SET NULL,
+     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+   )`,
+  // status mặc định 'published' → tin đang có vẫn hiện bình thường sau deploy.
+  // Tin RSS tự lấy ghi 'draft', phải duyệt tay mới lên trang chủ.
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_id INTEGER REFERENCES atld.news_sources(id) ON DELETE SET NULL`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_url VARCHAR(500)`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_name VARCHAR(120)`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMPTZ`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'published'`,
+  `UPDATE atld.news SET status = 'published' WHERE status IS NULL OR status = ''`,
+  // UNIQUE source_url: NULL không bị chặn → tin gõ tay không ảnh hưởng, chỉ chống trùng RSS
+  `DO $$ BEGIN
+     ALTER TABLE atld.news ADD CONSTRAINT news_source_url_unique UNIQUE (source_url);
+   EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$`,
+  `DO $$ BEGIN
+     ALTER TABLE atld.news ADD CONSTRAINT news_status_chk CHECK (status IN ('published', 'draft'));
+   EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+  `CREATE INDEX IF NOT EXISTS idx_news_status ON atld.news(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_news_source ON atld.news(source_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_news_sources_enabled ON atld.news_sources(enabled)`,
+  // published_at tách khỏi created_at: created_at là lúc tạo bản ghi (không đổi),
+  // published_at là ngày ban hành cán bộ chọn. Backfill = created_at để tin cũ giữ ngày.
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ`,
+  `UPDATE atld.news SET published_at = created_at WHERE published_at IS NULL`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS show_author BOOLEAN NOT NULL DEFAULT true`,
+  `CREATE INDEX IF NOT EXISTS idx_news_published_at ON atld.news(published_at DESC)`,
+]
+
+;(async () => {
+  for (const sql of NEWS_MIGRATIONS) {
+    try {
+      await query(sql)
+    } catch (e) {
+      console.error('[news migration]', (e as Error).message, '←', sql.trim().split('\n')[0])
+    }
+  }
+  console.log('[news migration] xong')
+})()
+
 // ═══════════════ CÔNG KHAI ═══════════════
 
 // Danh sách tin tức — CHỈ published. Guard này là bảo đảm quan trọng nhất của Pha I:
