@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { useAuth, canAccess } from '../context/AuthContext'
 import { Card, Badge } from '../components/ui'
 import { Plus, Trash2 } from 'lucide-react'
+import { fmtDate } from '../lib/date'
 
 const CATEGORIES = ['Thông báo', 'Sự kiện', 'Cảnh báo an toàn']
 const COLOR: Record<string, 'vicem' | 'eco' | 'red'> = {
@@ -17,7 +18,8 @@ interface NewsRow {
   title: string
   category: string
   excerpt: string
-  author: string
+  /** null khi cán bộ chọn ẩn tên tác giả */
+  author: string | null
   date: string
 }
 
@@ -91,7 +93,7 @@ export default function NewsPage() {
               <Link to={`/tin-tuc/${n.id}`} className="hover:text-vicem-600">{n.title}</Link>
             </h2>
             <p className="mt-1 flex-1 text-sm text-slate-600 line-clamp-3">{n.excerpt}</p>
-            <p className="mt-2 text-xs text-slate-400">{n.author} · {n.date}</p>
+            <p className="mt-2 text-xs text-slate-400">{[n.author, fmtDate(n.date)].filter(Boolean).join(' · ')}</p>
           </Card>
         ))}
       </div>

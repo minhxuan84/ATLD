@@ -1130,6 +1130,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
     await query(`CREATE INDEX IF NOT EXISTS idx_news_status ON atld.news(status)`)
     await query(`CREATE INDEX IF NOT EXISTS idx_news_source ON atld.news(source_id)`)
     await query(`CREATE INDEX IF NOT EXISTS idx_news_sources_enabled ON atld.news_sources(enabled)`)
+
+    // ──── Ngày ban hành sửa được + ẩn/hiện tác giả ────
+    // published_at tách khỏi created_at: created_at là lúc tạo bản ghi (không đổi),
+    // published_at là ngày ban hành cán bộ chọn. Backfill = created_at để tin cũ giữ ngày.
+    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ`)
+    await query(`UPDATE atld.news SET published_at = created_at WHERE published_at IS NULL`)
+    await query(`ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS show_author BOOLEAN NOT NULL DEFAULT true`)
+    await query(`CREATE INDEX IF NOT EXISTS idx_news_published_at ON atld.news(published_at DESC)`)
   } catch (e) {
     console.error('[hse migration]', (e as Error).message)
   }

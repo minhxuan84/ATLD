@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { Card, Badge } from '../ui'
+import { fmtDate } from '../../lib/date'
 
 const COLOR: Record<string, 'vicem' | 'eco' | 'red'> = {
   'Thông báo': 'vicem',
@@ -26,7 +27,7 @@ export default function LatestNews({ items }: Props) {
               <Link to={`/tin-tuc/${n.id}`} className="hover:text-vicem-600">{n.title}</Link>
             </h3>
             <p className="mt-1 flex-1 text-sm text-slate-600 line-clamp-3">{n.excerpt}</p>
-            <p className="mt-2 text-xs text-slate-400">{n.date}</p>
+            <p className="mt-2 text-xs text-slate-400">{fmtDate(n.date)}</p>
           </Card>
         ))}
       </div>

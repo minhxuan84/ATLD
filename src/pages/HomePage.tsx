@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
+import { fmtDate } from '../lib/date'
 import { useReveal } from '../hooks/useReveal'
 import { useConfig } from '../context/ConfigContext'
 import LandingHeader from '../components/home/LandingHeader'
@@ -389,7 +390,7 @@ export default function HomePage() {
                   <h3 className="mt-3 font-semibold text-slate-900 line-clamp-2 transition group-hover:text-vicem-600">{n.title}</h3>
                   <p className="mt-1.5 flex-1 text-sm text-slate-600 line-clamp-3">{n.excerpt}</p>
                   <p className="mt-4 flex items-center gap-1.5 text-xs text-slate-400">
-                    {n.date}
+                    {fmtDate(n.date)}
                     <ArrowRight className="h-3.5 w-3.5 opacity-0 transition group-hover:translate-x-0.5 group-hover:opacity-100" />
                   </p>
                 </Link>

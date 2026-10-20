@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
 import RichText from '../../components/RichText'
-import { fmtDateTime } from '../../lib/date'
+import { fmtDate, fmtDateTime } from '../../lib/date'
 import {
   Plus, Trash2, Pencil, X, Check, Rss, Clock, RefreshCw,
   ToggleLeft, ToggleRight, Eye, Send, AlertTriangle,
@@ -19,6 +19,7 @@ const CAT_COLOR: Record<string, string> = {
 interface NewsRow {
   id: number; title: string; category: string
   excerpt: string; content: string; author: string; date: string
+  show_author: boolean
 }
 interface DraftRow {
   id: number; title: string; category: string; excerpt: string
@@ -32,7 +33,12 @@ interface SourceRow {
   last_error: string | null; created_at: string
 }
 
-const EMPTY_NEWS = { id: 0, title: '', category: 'Thông báo', content: '' }
+// Ngày hôm nay dạng YYYY-MM-DD theo giờ máy (không dùng toISOString vì lệch ngày theo UTC).
+const todayIso = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+const EMPTY_NEWS = { id: 0, title: '', category: 'Thông báo', content: '', published_at: '', show_author: true }
 const EMPTY_SRC  = { id: 0, name: '', url: 'https://', interval_minutes: 180, category: 'Môi trường' }
 
 // ─── Gợi ý nguồn RSS sẵn có ───────────────────────────────────────────────────
@@ -54,14 +60,18 @@ export default function NewsManager() {
   const [newsErr, setNewsErr] = useState('')
 
   const fetchNews = useCallback(() => {
-    api<{ news: NewsRow[] }>('/news').then((d) => setItems(d.news)).catch(() => {})
+    // /news/manage thay vì /news: trả tên tác giả thật và cờ show_author kể cả khi đang ẩn.
+    api<{ news: NewsRow[] }>('/news/manage').then((d) => setItems(d.news)).catch(() => {})
   }, [])
   useEffect(fetchNews, [fetchNews])
 
-  const startNew  = () => { setNewsErr(''); setEditing({ ...EMPTY_NEWS }) }
+  const startNew  = () => { setNewsErr(''); setEditing({ ...EMPTY_NEWS, published_at: todayIso() }) }
   const startEdit = (n: NewsRow) => {
     setNewsErr('')
-    setEditing({ id: n.id, title: n.title, category: n.category, content: n.content })
+    setEditing({
+      id: n.id, title: n.title, category: n.category, content: n.content,
+      published_at: n.date, show_author: n.show_author,
+    })
   }
   const cancelNews = () => { setEditing(null); setNewsErr('') }
 
@@ -71,7 +81,10 @@ export default function NewsManager() {
     if (!editing.title.trim() || !editing.content.trim()) { setNewsErr('Cần tiêu đề và nội dung.'); return }
     setSaving(true); setNewsErr('')
     try {
-      const body = { title: editing.title, category: editing.category, content: editing.content }
+      const body = {
+        title: editing.title, category: editing.category, content: editing.content,
+        published_at: editing.published_at || undefined, show_author: editing.show_author,
+      }
       if (editing.id) await api(`/news/${editing.id}`, { method: 'PUT', body })
       else            await api('/news', { method: 'POST', body })
       setEditing(null); fetchNews()
@@ -225,6 +238,23 @@ export default function NewsManager() {
                   {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
+              <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+                <div>
+                  <label htmlFor="news-published-at" className="mb-1 block text-sm font-medium text-slate-700">Ngày ban hành</label>
+                  <input id="news-published-at" type="date" value={editing.published_at}
+                    onChange={(e) => setEditing({ ...editing, published_at: e.target.value })}
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100" />
+                  {editing.published_at && (
+                    <span className="ml-2 text-xs text-slate-400">Hiển thị: {fmtDate(editing.published_at)}</span>
+                  )}
+                </div>
+                <label className="inline-flex cursor-pointer items-center gap-2 pb-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={editing.show_author}
+                    onChange={(e) => setEditing({ ...editing, show_author: e.target.checked })}
+                    className="h-4 w-4 rounded border-slate-300 text-vicem-600 focus:ring-vicem-500" />
+                  Hiện tên tác giả trên trang tin
+                </label>
+              </div>
               <div>
                 <label className="mb-1 block text-sm font-medium text-slate-700">Nội dung</label>
                 <RichText value={editing.content} onChange={(html) => setEditing({ ...editing, content: html })} />
@@ -253,7 +283,9 @@ export default function NewsManager() {
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="truncate font-medium text-slate-800">{n.title}</p>
-                    <p className="truncate text-xs text-slate-400">{n.author} · {n.date} · {n.excerpt}</p>
+                    <p className="truncate text-xs text-slate-400">
+                      {n.show_author ? n.author : <span className="italic">{n.author} (ẩn tên)</span>} · {fmtDate(n.date)} · {n.excerpt}
+                    </p>
                   </div>
                   <button onClick={() => startEdit(n)}
                     className="rounded-lg p-1.5 text-slate-400 hover:bg-vicem-50 hover:text-vicem-600" aria-label={`Sửa ${n.title}`}>

@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { Badge } from '../components/ui'
 import { ArrowLeft } from 'lucide-react'
+import { fmtDate } from '../lib/date'
 
 const COLOR: Record<string, 'vicem' | 'eco' | 'red'> = {
   'Thông báo': 'vicem',
@@ -15,7 +16,8 @@ interface NewsItem {
   title: string
   category: string
   content: string
-  author: string
+  /** null khi cán bộ chọn ẩn tên tác giả */
+  author: string | null
   date: string
 }
 
@@ -42,7 +44,7 @@ export default function NewsDetailPage() {
         <Badge color={COLOR[item.category] ?? 'slate'}>{item.category}</Badge>
       </div>
       <h1 className="mt-2 text-3xl font-bold leading-tight text-slate-800">{item.title}</h1>
-      <p className="mt-2 text-sm text-slate-400">{item.author} · {item.date}</p>
+      <p className="mt-2 text-sm text-slate-400">{[item.author, fmtDate(item.date)].filter(Boolean).join(' · ')}</p>
       {/* Nội dung HTML đã được sanitize phía server (chống XSS) trước khi lưu */}
       <div
         className="prose-news mt-6 leading-relaxed text-slate-700"

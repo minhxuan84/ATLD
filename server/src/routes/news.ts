@@ -11,25 +11,63 @@ export const newsSourcesRouter = Router()
 
 // Danh sách tin tức — CHỈ published. Guard này là bảo đảm quan trọng nhất của Pha I:
 // thiếu WHERE status='published' thì tin chưa duyệt lên thẳng trang chủ.
+// Ngày hiển thị = ngày ban hành (published_at), rơi về created_at với bản ghi chưa backfill.
+const NEWS_DATE = `to_char(COALESCE(published_at, created_at), 'YYYY-MM-DD')`
+
+/**
+ * Ngày ban hành do cán bộ chọn ('YYYY-MM-DD' từ <input type="date">).
+ * undefined = không gửi (giữ nguyên); null = gửi sai định dạng.
+ * Kiểm cả ngày có thật (chặn 2026-02-31) vì Postgres sẽ ném lỗi, Express 4 không bắt
+ * được lỗi async và request treo.
+ */
+function parsePublishDate(v: unknown): string | null | undefined {
+  if (v === undefined || v === null || v === '') return undefined
+  const s = String(v)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null
+  const d = new Date(`${s}T00:00:00Z`)
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null
+  const y = d.getUTCFullYear()
+  if (y < 2000 || y > 2100) return null
+  return s
+}
+
 newsRouter.get('/', async (_req, res) => {
   const { rows } = await query<{
     id: number; title: string; category: string; excerpt: string
-    content: string; author: string; date: string
+    content: string; author: string | null; date: string
   }>(
-    `SELECT id, title, category, excerpt, content, author,
-            to_char(created_at, 'YYYY-MM-DD') AS date
+    // Ẩn tác giả ngay ở SQL: show_author=false thì không gửi tên ra ngoài, kể cả trong JSON.
+    `SELECT id, title, category, excerpt, content,
+            CASE WHEN show_author THEN author END AS author,
+            ${NEWS_DATE} AS date
      FROM atld.news
      WHERE status = 'published'
-     ORDER BY created_at DESC`,
+     ORDER BY COALESCE(published_at, created_at) DESC, id DESC`,
   )
   const news = rows.map((r) => ({ ...r, excerpt: makeExcerpt(r.content) }))
   res.json({ news })
 })
 
-newsRouter.get('/:id', async (req, res) => {
+// Danh sách cho CMS: đủ tác giả thật + cờ show_author để form sửa hiện đúng trạng thái.
+newsRouter.get('/manage', requireAuth, requireSection('tin-tuc'), async (_req, res) => {
   const { rows } = await query(
-    `SELECT id, title, category, excerpt, content, author,
-            to_char(created_at, 'YYYY-MM-DD') AS date
+    `SELECT id, title, category, excerpt, content, author, show_author,
+            ${NEWS_DATE} AS date
+     FROM atld.news
+     WHERE status = 'published'
+     ORDER BY COALESCE(published_at, created_at) DESC, id DESC`,
+  )
+  res.json({ news: rows.map((r) => ({ ...r, excerpt: makeExcerpt(r.content) })) })
+})
+
+newsRouter.get('/:id', async (req, res, next) => {
+  // '/:id' khai báo trước '/drafts' nên phải nhường các đường không phải số, nếu không
+  // GET /news/drafts rơi vào đây và Postgres ném lỗi ép kiểu integer.
+  if (!/^\d+$/.test(req.params.id)) return next()
+  const { rows } = await query(
+    `SELECT id, title, category, excerpt, content,
+            CASE WHEN show_author THEN author END AS author,
+            ${NEWS_DATE} AS date
      FROM atld.news WHERE id = $1 AND status = 'published'`,
     [req.params.id],
   )
@@ -46,11 +84,15 @@ newsRouter.post('/', requireAuth, requireSection('tin-tuc'), async (req, res) =>
   const content = sanitizeHtml(String(req.body?.content ?? '').trim()).slice(0, 20000)
   if (!title || !content) return res.status(400).json({ error: 'Thiếu tiêu đề hoặc nội dung.' })
 
+  const publishDate = parsePublishDate(req.body?.published_at)
+  if (publishDate === null) return res.status(400).json({ error: 'Ngày ban hành không hợp lệ.' })
+  const showAuthor = req.body?.show_author !== false
+
   const excerpt = makeExcerpt(content)
   const { rows } = await query(
-    `INSERT INTO atld.news (title, category, excerpt, content, author, status)
-     VALUES ($1, $2, $3, $4, $5, 'published') RETURNING id`,
-    [title, category, excerpt, content, req.user!.fullName],
+    `INSERT INTO atld.news (title, category, excerpt, content, author, status, published_at, show_author)
+     VALUES ($1, $2, $3, $4, $5, 'published', COALESCE($6::date::timestamptz, now()), $7) RETURNING id`,
+    [title, category, excerpt, content, req.user!.fullName, publishDate ?? null, showAuthor],
   )
   res.status(201).json({ id: rows[0].id })
 })
@@ -62,10 +104,18 @@ newsRouter.put('/:id', requireAuth, requireSection('tin-tuc'), async (req, res) 
   const content = sanitizeHtml(String(req.body?.content ?? '').trim()).slice(0, 20000)
   if (!title || !content) return res.status(400).json({ error: 'Thiếu tiêu đề hoặc nội dung.' })
 
+  const publishDate = parsePublishDate(req.body?.published_at)
+  if (publishDate === null) return res.status(400).json({ error: 'Ngày ban hành không hợp lệ.' })
+  // Không gửi thì giữ nguyên (NULL → COALESCE về giá trị cũ).
+  const showAuthor = typeof req.body?.show_author === 'boolean' ? req.body.show_author : null
+
   const excerpt = makeExcerpt(content)
   const { rowCount } = await query(
-    'UPDATE atld.news SET title=$1, category=$2, excerpt=$3, content=$4 WHERE id=$5',
-    [title, category, excerpt, content, req.params.id],
+    `UPDATE atld.news SET title=$1, category=$2, excerpt=$3, content=$4,
+            published_at = COALESCE($6::date::timestamptz, published_at),
+            show_author  = COALESCE($7, show_author)
+     WHERE id=$5`,
+    [title, category, excerpt, content, req.params.id, publishDate ?? null, showAuthor],
   )
   if (!rowCount) return res.status(404).json({ error: 'Không tìm thấy tin.' })
   res.json({ ok: true })
@@ -100,7 +150,8 @@ newsRouter.get('/drafts', requireAuth, requireSection('tin-tuc'), async (_req, r
 // Duyệt một tin draft → published
 newsRouter.patch('/:id/publish', requireAuth, requireSection('tin-tuc'), async (req, res) => {
   // Cho phép sửa tiêu đề / danh mục trước khi duyệt (tuỳ chọn, bỏ qua nếu không gửi)
-  const updates: string[] = ["status = 'published'"]
+  // Tin RSS duyệt hôm nay thì ngày ban hành là hôm nay, không phải lúc bot quét về.
+  const updates: string[] = ["status = 'published'", 'published_at = now()']
   const vals: unknown[] = []
 
   if (req.body?.title) {
