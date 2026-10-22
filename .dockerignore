@@ -1,7 +1,8 @@
 # Dependencies
 node_modules
 server/node_modules
-auto-video-gen/node_modules
+# Đã bỏ tính năng tạo video tự động: không đưa cả thư mục vào build context
+auto-video-gen
 
 # Build outputs
 dist
@@ -18,8 +19,6 @@ server/dist
 .env.*.local
 .env.docker
 server/.env
-auto-video-gen/.env.local
-auto-video-gen/.env.*.local
 
 # Docker
 Dockerfile

@@ -16,39 +16,18 @@ RUN npm ci
 COPY server/ ./
 RUN npm run build
 
-# Stage 3: auto-video-gen deps (tsx + pipeline — NO chromium download)
-FROM node:20-alpine AS video-builder
-WORKDIR /app/auto-video-gen
-COPY auto-video-gen/package*.json ./
-# Tắt Puppeteer auto-download Chrome: Chrome sẽ được cài bởi apk trong runtime
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-RUN npm install
-COPY auto-video-gen/ ./
-
-# Stage 4: Production runtime
+# Stage 3: Production runtime
 FROM node:20-alpine
 ENV NODE_ENV=production
 ENV PORT=4000
 
-# Chromium + FFmpeg cho auto-video-gen (HyperFrames render + audio processing)
-# Ghi chú: nss, freetype, harfbuzz cần thiết để Chromium chạy trong Alpine
+# font-opensans: PDF tiếng Việt (giấy phép, chứng nhận, bài làm) nhúng OpenSans từ
+# /usr/share/fonts/opensans (xem VN_FONT_CANDIDATES trong server/src/lib/pdf.ts).
+# Trước đây font này đi kèm gián tiếp theo chromium; bỏ chromium thì phải cài tường minh,
+# thiếu font PDF vẫn ra nhưng mất dấu.
 RUN apk add --no-cache \
-      ffmpeg \
-      chromium \
-      nss \
-      freetype \
-      harfbuzz \
       ca-certificates \
-      ttf-freefont
-
-# Trỏ Puppeteer / HyperFrames đến Chromium của hệ thống (không download riêng)
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-ENV CHROME_PATH=/usr/bin/chromium-browser
-# Cho phép chạy Chromium trong container không có sandbox (cần thiết trong Docker)
-ENV CHROMIUM_FLAGS="--no-sandbox --disable-setuid-sandbox"
+      font-opensans
 
 # Server chạy từ /app/server/dist/index.js, phục vụ client build ở /app/dist,
 # lưu ảnh vào /app/server/uploads. Giữ đúng cấu trúc này để các path tương đối khớp.
@@ -64,13 +43,10 @@ COPY --from=server-builder /app/server/dist ./dist
 # Copy client build ra /app/dist (server đọc từ ../../dist)
 COPY --from=client-builder /app/dist /app/dist
 
-# Copy auto-video-gen (source + node_modules với tsx/hyperframes/etc.)
-COPY --from=video-builder /app/auto-video-gen /app/auto-video-gen
-
-# Thư mục lưu ảnh nhận diện, ảnh nội dung, video AI (persist qua volume)
+# Thư mục lưu ảnh nhận diện, ảnh nội dung (persist qua volume).
+# uploads/videos giữ lại để video đã render trước đây (nếu có) vẫn phát được.
 RUN mkdir -p uploads/media uploads/content uploads/videos \
-    && chown -R node:node /app/server/uploads \
-    && chown -R node:node /app/auto-video-gen
+    && chown -R node:node /app/server/uploads
 
 USER node
 EXPOSE 4000

@@ -6,8 +6,7 @@ import { requireAuth, requireSection, requireCms, CMS_SECTIONS, requireRole } fr
 import { escapeText } from '../util.js'
 import { audit, clientIp } from '../lib/hse-core.js'
 import { hashToken } from './portal.js'
-import { generateCourse, aiAvailable, buildVideoScript, type GeneratedCourse } from '../ai.js'
-import { createJob, getJob, spawnVideoJob } from '../video.js'
+import { generateCourse, aiAvailable } from '../ai.js'
 import { authenticateLdapWithConfig, syncUsersFromAd } from '../lib/ldap.js'
 import type { LdapConfig } from '../lib/ldap.js'
 
@@ -136,7 +135,6 @@ adminRouter.delete('/users/:id', requireSection('nguoi-dung'), async (req, res) 
 
 // ---- Khóa học ----
 // AI sinh nội dung khóa học từ chủ đề (prompt). Trả bản nháp để duyệt, KHÔNG tự lưu.
-// Video KHÔNG tự khởi động — admin xem lại nội dung rồi bấm "Tạo video" (POST /videos/create).
 adminRouter.post('/courses/ai-generate', requireSection('khoa-hoc'), async (req, res) => {
   if (!aiAvailable()) {
     return res.status(503).json({ error: 'Chưa cấu hình AI (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL) trên máy chủ.' })
@@ -758,65 +756,6 @@ adminRouter.post('/smartca-test', requireRole('admin'), async (req, res) => {
     res.json({ ok: true, msg: `Kết nối SmartCA thành công (${b.api_url})` })
   } catch (e) {
     res.json({ ok: false, msg: e instanceof Error ? e.message : 'Kết nối thất bại.' })
-  }
-})
-
-// ── Video jobs (auto-video-gen) ───────────────────────────────────────────────
-
-/** GET /api/admin/videos/:jobId/status — poll trạng thái job tạo video */
-adminRouter.get('/videos/:jobId/status', requireSection('khoa-hoc'), (req, res) => {
-  const job = getJob(req.params.jobId)
-  if (!job) return res.status(404).json({ error: 'Job không tồn tại (có thể đã reset sau khi restart server).' })
-  res.json({
-    jobId: job.jobId,
-    status: job.status,          // 'pending' | 'running' | 'done' | 'error'
-    topic: job.topic,
-    createdAt: job.createdAt,
-    videoUrl: job.status === 'done'
-      ? `/uploads/videos/${job.jobId}/video.mp4`
-      : null,
-    error: job.error ?? null,
-  })
-})
-
-/** GET /api/admin/videos/:jobId/file — download video.mp4 khi job 'done' */
-adminRouter.get('/videos/:jobId/file', requireSection('khoa-hoc'), (req, res) => {
-  const job = getJob(req.params.jobId)
-  if (!job) return res.status(404).json({ error: 'Job không tồn tại.' })
-  if (job.status !== 'done' || !job.videoPath) {
-    return res.status(409).json({ error: `Video chưa sẵn sàng (trạng thái: ${job.status}).` })
-  }
-  res.download(job.videoPath, `video-${job.jobId.slice(0, 8)}.mp4`)
-})
-
-/** POST /api/admin/videos/create — khởi động job tạo video từ nội dung admin đã kiểm tra */
-adminRouter.post('/videos/create', requireSection('khoa-hoc'), async (req, res) => {
-  const topic = String(req.body?.topic ?? '').trim().slice(0, 500)
-  if (topic.length < 3) return res.status(400).json({ error: 'Thiếu chủ đề.' })
-  const courseData = req.body?.course as Partial<GeneratedCourse> | undefined
-  if (!courseData?.title) return res.status(400).json({ error: 'Thiếu dữ liệu khóa học (course.title).' })
-  // Validate imageUrl — phải là URL tuyệt đối hợp lệ hoặc null
-  let imageUrl: string | null = null
-  const rawImage = req.body?.imageUrl ? String(req.body.imageUrl).trim() : ''
-  if (rawImage) {
-    try { new URL(rawImage); imageUrl = rawImage } catch { /* URL không hợp lệ — bỏ qua */ }
-  }
-  const course: GeneratedCourse = {
-    title: String(courseData.title ?? '').slice(0, 200),
-    description: String(courseData.description ?? ''),
-    grp: String(courseData.grp ?? 'Nhóm 4'),
-    duration: String(courseData.duration ?? ''),
-    summary: Array.isArray(courseData.summary) ? courseData.summary.map(String) : [],
-    questions: [], // không cần câu hỏi để build script video
-  }
-  try {
-    const script = buildVideoScript(course, topic, imageUrl)
-    const jobId = createJob(topic)
-    await spawnVideoJob(jobId, script)
-    res.json({ jobId })
-  } catch (err) {
-    console.error('[videos/create]', (err as Error).message)
-    res.status(500).json({ error: 'Không thể khởi động job tạo video.' })
   }
 })
 

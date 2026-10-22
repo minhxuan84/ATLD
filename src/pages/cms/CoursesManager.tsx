@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
-import { Plus, Trash2, ChevronDown, ChevronRight, Check, Pencil, X, Award, Sparkles, Loader2, Video, QrCode, Link2, DownloadCloud } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, Pencil, X, Award, Sparkles, Loader2, QrCode, Link2, DownloadCloud } from 'lucide-react'
 import { fmtDate } from '../../lib/date'
 
 interface CourseRow {
@@ -96,9 +96,7 @@ export default function CoursesManager() {
   const [aiQuestions, setAiQuestions] = useState<QuestionDraft[]>([])
   // Cấu hình + theo dõi tiến trình AI
   const [aiQuestionCount, setAiQuestionCount] = useState(8)
-  const [aiStep, setAiStep] = useState<null | 'content' | 'quiz' | 'video' | 'done' | 'error'>(null)
-  const [aiVideoJobId, setAiVideoJobId] = useState<string | null>(null)
-  const [aiFrameImageUrl, setAiFrameImageUrl] = useState('')
+  const [aiStep, setAiStep] = useState<null | 'content' | 'done' | 'error'>(null)
 
   // Sửa khóa học
   const [editCourse, setEditCourse] = useState<string | null>(null)
@@ -112,22 +110,6 @@ export default function CoursesManager() {
     api<{ branches: Branch[] }>('/admin/branches').then((d) => setBranches(d.branches)).catch(() => {})
   }, [])
   useEffect(fetchCourses, [fetchCourses])
-
-  // Polling trạng thái job video (mỗi 5 giây) khi AI đang render video
-  useEffect(() => {
-    if (!aiVideoJobId || aiStep !== 'video') return
-    const interval = setInterval(async () => {
-      try {
-        const s = await api<{ status: string; videoUrl: string | null }>(`/admin/videos/${aiVideoJobId}/status`)
-        if (s.status === 'done') {
-          if (s.videoUrl) setNewCourse(c => ({ ...c, video_url: s.videoUrl! }))
-          setAiStep('done'); clearInterval(interval)
-        }
-        if (s.status === 'error') { setAiStep('error'); clearInterval(interval) }
-      } catch { /* bỏ qua lỗi mạng tạm thời */ }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [aiVideoJobId, aiStep])
 
   const reloadQuestions = async (courseId: string) => {
     const d = await api<{ questions: QuestionRow[] }>(`/admin/courses/${courseId}/questions`)
@@ -197,8 +179,6 @@ export default function CoursesManager() {
       setAiQuestions([])
       setAiTopic('')
       setAiStep(null)
-      setAiVideoJobId(null)
-      setAiFrameImageUrl('')
       fetchCourses()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Tạo khóa học thất bại.')
@@ -208,7 +188,7 @@ export default function CoursesManager() {
   // Gọi AI sinh nội dung, tự điền vào form (giữ mã khóa học admin đã nhập)
   const aiGenerate = async () => {
     if (aiTopic.trim().length < 3) { setError('Nhập chủ đề để AI soạn nội dung.'); return }
-    setAiLoading(true); setAiStep('content'); setAiVideoJobId(null); setError('')
+    setAiLoading(true); setAiStep('content'); setError('')
     try {
       const { course } = await api<{
         course: { title: string; description: string; grp: string; duration: string; summary: string[]; questions: QuestionDraft[] }
@@ -219,34 +199,11 @@ export default function CoursesManager() {
         duration: course.duration, summary: course.summary.join('\n'),
       }))
       setAiQuestions(course.questions ?? [])
-      // Nội dung sẵn sàng → chờ admin xem lại trước khi tạo video
-      setAiStep('quiz')
+      setAiStep('done')
     } catch (err) {
       setAiStep('error')
       setError(err instanceof Error ? err.message : 'AI sinh nội dung thất bại.')
     } finally { setAiLoading(false) }
-  }
-
-  // Khởi động job tạo video sau khi admin đã kiểm tra nội dung
-  const startVideoRender = async () => {
-    try {
-      const { jobId } = await api<{ jobId: string }>('/admin/videos/create', {
-        method: 'POST',
-        body: {
-          topic: aiTopic,
-          imageUrl: aiFrameImageUrl.trim() || null,
-          course: {
-            title: newCourse.title, description: newCourse.description, grp: newCourse.grp,
-            duration: newCourse.duration, summary: newCourse.summary.split('\n').filter((s) => s.trim()),
-            questions: [],
-          },
-        },
-      })
-      setAiVideoJobId(jobId); setAiStep('video')
-    } catch (err) {
-      setAiStep('error')
-      setError(err instanceof Error ? err.message : 'Không thể khởi động tạo video.')
-    }
   }
 
   const startEditCourse = (c: CourseRow) => {
@@ -322,7 +279,7 @@ export default function CoursesManager() {
               <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-vicem-600" aria-hidden />
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-vicem-800">Tạo nội dung bằng AI</p>
-                <p className="text-xs text-vicem-600 mb-2">Nhập chủ đề, AI sẽ soạn nội dung, câu hỏi và khởi động render video tự động.</p>
+                <p className="text-xs text-vicem-600 mb-2">Nhập chủ đề, AI sẽ soạn nội dung và câu hỏi để bạn xem lại trước khi lưu. Video nhập link ở ô bên dưới.</p>
                 <div className="flex flex-wrap gap-2">
                   <input
                     value={aiTopic}
@@ -349,87 +306,24 @@ export default function CoursesManager() {
                   </button>
                 </div>
 
-                {/* Thanh tiến trình 3 bước */}
+                {/* Tiến trình 2 bước */}
                 {aiStep !== null && (
                   <div className="mt-3 flex flex-wrap items-center gap-1">
                     <AiStepBadge
                       label="Soạn nội dung"
-                      status={
-                        aiStep === 'content' ? 'running' :
-                        aiStep === 'error' && !aiVideoJobId ? 'error' : 'done'
-                      }
+                      status={aiStep === 'content' ? 'running' : aiStep === 'error' ? 'error' : 'done'}
                     />
                     <div className="h-px w-4 shrink-0 bg-slate-200" />
                     <AiStepBadge
                       label={`${aiQuestions.length > 0 ? aiQuestions.length : aiQuestionCount} câu hỏi`}
-                      status={
-                        aiStep === 'content' ? 'waiting' :
-                        aiStep === 'error' && !aiVideoJobId ? 'error' : 'done'
-                      }
+                      status={aiStep === 'content' ? 'waiting' : aiStep === 'error' ? 'error' : 'done'}
                     />
-                    <div className="h-px w-4 shrink-0 bg-slate-200" />
-                    <AiStepBadge
-                      label="Video clip"
-                      status={
-                        aiStep === 'content' || aiStep === 'quiz' ? 'waiting' :
-                        aiStep === 'video' ? 'running' :
-                        aiStep === 'done' ? 'done' :
-                        aiStep === 'error' ? 'error' : 'waiting'
-                      }
-                    />
-                    {aiStep === 'quiz' && (
-                      <span className="ml-1 text-xs italic text-sky-600">↓ xem lại bên dưới</span>
-                    )}
-                    {aiStep === 'video' && (
-                      <span className="ml-1 text-xs italic text-slate-400">đang render…</span>
-                    )}
                     {aiStep === 'done' && (
-                      <span className="ml-1 text-xs font-medium text-emerald-600">✓ Hoàn tất</span>
+                      <span className="ml-1 text-xs font-medium text-emerald-600">✓ Đã điền vào form, xem lại trước khi lưu</span>
                     )}
                     {aiStep === 'error' && (
                       <span className="ml-1 text-xs text-red-600">Có lỗi — thử lại.</span>
                     )}
-                  </div>
-                )}
-
-                {/* Panel xem lại nội dung — xuất hiện sau khi AI sinh xong, chờ admin xác nhận tạo video */}
-                {aiStep === 'quiz' && (
-                  <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3">
-                    <p className="text-sm font-semibold text-sky-800">Xem lại nội dung trước khi tạo video</p>
-                    <div className="mt-2 space-y-1 text-xs text-slate-600">
-                      <div><span className="font-medium">Tiêu đề:</span> {newCourse.title}</div>
-                      <div><span className="font-medium">Mô tả:</span> {newCourse.description}</div>
-                      <div>
-                        <span className="font-medium">Tóm tắt:</span>{' '}
-                        {newCourse.summary.split('\n').filter((s) => s.trim()).length} ý ·{' '}
-                        <span className="font-medium">Câu hỏi:</span> {aiQuestions.length} câu
-                      </div>
-                    </div>
-                    {/* Cấu hình ảnh bìa (frame) cho video — tùy chọn */}
-                    <div className="mt-3">
-                      <input
-                        value={aiFrameImageUrl}
-                        onChange={(e) => setAiFrameImageUrl(e.target.value)}
-                        placeholder="URL ảnh bìa video (tùy chọn — để trống dùng nền màu mặc định)"
-                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-sky-400 focus:ring-1 focus:ring-sky-100"
-                      />
-                    </div>
-                    <div className="mt-2 flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={startVideoRender}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-vicem-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-vicem-700"
-                      >
-                        <Video className="h-3.5 w-3.5" /> Tạo video
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setAiStep('done')}
-                        className="text-xs text-slate-500 underline hover:text-slate-700"
-                      >
-                        Bỏ qua video
-                      </button>
-                    </div>
                   </div>
                 )}
               </div>
