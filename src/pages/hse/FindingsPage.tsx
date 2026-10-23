@@ -3,6 +3,7 @@
 // khắc phục → xác minh → (duyệt làm tiếp) → đóng. Server cưỡng chế thứ tự.
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../lib/api'
+import { isOpenContract, contractStatusSuffix } from '../../lib/contracts'
 import { fmtDate, fmtDateTime } from '../../lib/date'
 import { useAuth, canHse } from '../../context/AuthContext'
 
@@ -137,7 +138,7 @@ export default function FindingsPage() {
 
   useEffect(() => {
     api<{ contracts: Contract[] }>('/hse/contracts')
-      .then((d) => setContracts(d.contracts.filter((c) => c.status === 'active'))).catch(() => {})
+      .then((d) => setContracts(d.contracts.filter(isOpenContract))).catch(() => {})
     api<{ contractors: Contractor[] }>('/hse/contractors').then((d) => setContractors(d.contractors)).catch(() => {})
     api<{ workTypes: WorkType[] }>('/jsa/work-types').then((d) => setWorkTypes(d.workTypes)).catch(() => {})
     api<{ workers: Worker[] }>('/hse/workers').then((d) => setWorkers(d.workers)).catch(() => {})
@@ -397,7 +398,7 @@ function CreateFindingModal({
             <select value={f.contract_id} onChange={(e) => setF({ ...f, contract_id: e.target.value })}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
               <option value="">-- Không gắn</option>
-              {contracts.map((c) => <option key={c.id} value={c.id}>{c.contract_no} — {c.contractor_name}</option>)}
+              {contracts.map((c) => <option key={c.id} value={c.id}>{c.contract_no} — {c.contractor_name}{contractStatusSuffix(c)}</option>)}
             </select>
           </div>
           <div>

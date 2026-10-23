@@ -7,6 +7,7 @@
  */
 import { useEffect, useState, useCallback } from 'react'
 import { api, downloadFile } from '../../lib/api'
+import { isOpenContract, contractStatusSuffix } from '../../lib/contracts'
 import { fmtDate, fmtDateTime } from '../../lib/date'
 import {
   Link2, Trash2, Copy, Check, Inbox, UserCheck, UserX, FileText, Plus, X,
@@ -307,7 +308,7 @@ function CreateTokenForm({
     api<{ contractors: Contractor[] }>('/hse/contractors')
       .then((d) => setContractors(d.contractors)).catch(() => {})
     api<{ contracts: Contract[] }>('/hse/contracts')
-      .then((d) => setContracts(d.contracts.filter((c) => c.status === 'active'))).catch(() => {})
+      .then((d) => setContracts(d.contracts.filter(isOpenContract))).catch(() => {})
     api<{ branches: Branch[] }>('/admin/branches')
       .then((d) => setBranches(d.branches)).catch(() => {})
     // Chỉ phiếu đang chờ khắc phục mới cần link phản hồi.
@@ -389,7 +390,7 @@ function CreateTokenForm({
           <select className={cls} value={contractId} onChange={(e) => setContractId(e.target.value)}>
             <option value="">— Không gắn hợp đồng —</option>
             {shownContracts.map((c) => (
-              <option key={c.id} value={c.id}>{c.contract_no} — {c.title}</option>
+              <option key={c.id} value={c.id}>{c.contract_no} — {c.title}{contractStatusSuffix(c)}</option>
             ))}
           </select>
         </label>

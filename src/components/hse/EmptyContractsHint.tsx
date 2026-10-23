@@ -15,12 +15,12 @@ export default function EmptyContractsHint({ activeOnly = false }: { activeOnly?
     <p className="mt-2 rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">
       {allSites ? (
         <>
-          Chưa có hợp đồng nào{activeOnly ? ' đang hoạt động' : ''} trong hệ thống. Tạo hợp đồng
+          Chưa có hợp đồng nào{activeOnly ? ' đang thực hiện hoặc chờ duyệt' : ''} trong hệ thống. Tạo hợp đồng
           ở tab <b>Nhà thầu &amp; Hợp đồng</b> trước.
         </>
       ) : (
         <>
-          Không có hợp đồng nào{activeOnly ? ' đang hoạt động' : ''} thuộc nhà máy bạn phụ trách.
+          Không có hợp đồng nào{activeOnly ? ' đang thực hiện hoặc chờ duyệt' : ''} thuộc nhà máy bạn phụ trách.
           Hợp đồng được tạo trước khi phân chia nhà máy có thể đang gắn vào nhà máy khác — nhờ
           quản trị viên kiểm tra mục <b>Chi nhánh / site</b> của hợp đồng.
         </>

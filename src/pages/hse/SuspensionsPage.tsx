@@ -1,6 +1,7 @@
 // Đình chỉ công việc (R6) — tạo lệnh đình chỉ tức thì, xem danh sách, gỡ đình chỉ.
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
+import { isOpenContract, contractStatusSuffix } from '../../lib/contracts'
 import { exportFormPdf } from '../../lib/formPdf'
 import { fmtDate, fmtDateTime } from '../../lib/date'
 import EmptyContractsHint from '../../components/hse/EmptyContractsHint'
@@ -44,7 +45,7 @@ export default function SuspensionsPage() {
   useEffect(() => {
     load()
     api<{ contracts: Contract[] }>('/hse/contracts').then((d) =>
-      setContracts(d.contracts.filter((c) => c.status === 'active'))
+      setContracts(d.contracts.filter(isOpenContract))
     )
     // Gồm cả NLĐ nội bộ: đình chỉ cá nhân không đòi phải thuộc hợp đồng nhà thầu nào.
     api<{ workers: Worker[] }>('/hse/workers').then((d) => setWorkers(d.workers))
@@ -313,17 +314,17 @@ export default function SuspensionsPage() {
               )}
               <div>
                 <label className="mb-1 block text-sm font-medium text-slate-700">
-                  Hợp đồng đang hoạt động {form.target_scope === 'worker' ? '(tuỳ chọn, để ghi bối cảnh)' : '*'}
+                  Hợp đồng {form.target_scope === 'worker' ? '(tuỳ chọn, để ghi bối cảnh)' : '*'}
                 </label>
                 <select value={form.contract_id} onChange={(e) => setForm({ ...form, contract_id: e.target.value })}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
                   <option value="">-- Chọn hợp đồng</option>
                   {contracts.map((c) => (
-                    <option key={c.id} value={c.id}>{c.contract_no} — {c.contractor_name} ({c.title})</option>
+                    <option key={c.id} value={c.id}>{c.contract_no} — {c.contractor_name} ({c.title}){contractStatusSuffix(c)}</option>
                   ))}
                 </select>
-                {/* Ở đây còn lọc thêm status='active', nên nói rõ "đang hoạt động" để cán bộ
-                    không đi tìm hợp đồng vừa tạo mà còn ở trạng thái 'pending'. */}
+                {/* Chỉ liệt kê hợp đồng đang thực hiện hoặc chờ duyệt (isOpenContract); hợp đồng
+                    đã hoàn thành / hủy / đình chỉ thì không đình chỉ thêm được. */}
                 {contracts.length === 0 && <EmptyContractsHint activeOnly />}
               </div>
               <div>
