@@ -3,6 +3,7 @@ dist
 server/dist
 .env
 .env.docker
+.env.deploy
 server/uploads
 *.log
 
@@ -25,7 +26,9 @@ _rebuild.mjs
 _upload.mjs
 _ssh_diag_tmp.js
 _test.txt
-.claude/
+# .claude/ được track (skills, policies); chỉ bỏ cấu hình cục bộ (có thể chứa bí mật)
+.claude/settings.local.json
+.claude/settings.local.*
 
 # Env chứa API key TTS/AI của auto-video-gen
 auto-video-gen/.env.local
@@ -38,3 +41,9 @@ auto-video-gen/
 
 # File PDF sinh ra khi thử buildCommitmentPdf, không có mã nào tham chiếu
 _g.pdf
+
+# Script/kết quả thử nghiệm tạm trong server/
+server/_*.mjs
+server/_h5out/
+*.tsbuildinfo
+backups/

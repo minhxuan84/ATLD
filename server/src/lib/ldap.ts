@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import ldap from 'ldapjs'
 import { query } from '../db.js'
 
@@ -29,12 +30,31 @@ export function getConfigFromEnv(): LdapConfig | null {
   }
 }
 
+let warnedInsecureTls = false
+
+/**
+ * TLS cho ldaps://. Mặc định giữ hành vi cũ (không kiểm chứng chỉ, vì AD nội bộ thường dùng CA riêng)
+ * nhưng cảnh báo một lần. Bật kiểm tra:
+ *  - LDAP_TLS_CA_FILE=/path/ca.pem → tin CA này và bắt buộc kiểm chứng chỉ
+ *  - LDAP_TLS_REJECT_UNAUTHORIZED=true → kiểm theo CA hệ thống
+ */
+export function ldapTlsOptions(): { rejectUnauthorized: boolean; ca?: Buffer } {
+  const caFile = process.env.LDAP_TLS_CA_FILE
+  if (caFile) return { rejectUnauthorized: true, ca: fs.readFileSync(caFile) }
+  if (process.env.LDAP_TLS_REJECT_UNAUTHORIZED === 'true') return { rejectUnauthorized: true }
+  if (!warnedInsecureTls) {
+    warnedInsecureTls = true
+    console.warn('[ldap] TLS không kiểm chứng chỉ — đặt LDAP_TLS_CA_FILE hoặc LDAP_TLS_REJECT_UNAUTHORIZED=true để bật.')
+  }
+  return { rejectUnauthorized: false }
+}
+
 function createClient(url: string): ldap.Client {
   return ldap.createClient({
     url,
     timeout: 5000,
     connectTimeout: 5000,
-    tlsOptions: { rejectUnauthorized: false },
+    tlsOptions: ldapTlsOptions(),
   })
 }
 

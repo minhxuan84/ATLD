@@ -7,7 +7,7 @@ import { escapeText } from '../util.js'
 import { audit, clientIp } from '../lib/hse-core.js'
 import { hashToken } from './portal.js'
 import { generateCourse, aiAvailable } from '../ai.js'
-import { authenticateLdapWithConfig, syncUsersFromAd } from '../lib/ldap.js'
+import { authenticateLdapWithConfig, syncUsersFromAd, ldapTlsOptions } from '../lib/ldap.js'
 import type { LdapConfig } from '../lib/ldap.js'
 
 export const adminRouter = Router()
@@ -653,7 +653,7 @@ adminRouter.post('/ldap-test', requireRole('admin'), async (req, res) => {
   try {
     // Thử bind bằng service account — nếu thành công là kết nối OK
     const ldap = await import('ldapjs')
-    const client = ldap.default.createClient({ url: cfg.url, timeout: 5000, connectTimeout: 5000, tlsOptions: { rejectUnauthorized: false } })
+    const client = ldap.default.createClient({ url: cfg.url, timeout: 5000, connectTimeout: 5000, tlsOptions: ldapTlsOptions() })
     await new Promise<void>((ok, fail) => {
       client.bind(cfg.bindDn, cfg.bindPassword, (err) => { client.destroy(); err ? fail(err) : ok() })
     })

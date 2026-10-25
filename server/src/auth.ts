@@ -40,7 +40,12 @@ declare global {
   }
 }
 
-const SECRET = process.env.JWT_SECRET || 'dev_secret'
+// Production thiếu JWT_SECRET → dừng khởi động, không lặng lẽ ký token bằng khoá ai cũng biết.
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET chưa được đặt — bắt buộc khi NODE_ENV=production.')
+}
+export const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret'
+const SECRET = JWT_SECRET
 const EXPIRES = process.env.JWT_EXPIRES || '8h'
 // "Lưu đăng nhập": token sống lâu (mặc định 30 ngày) để giữ phiên qua nhiều ngày,
 // thay vì hết hạn sau 8h khiến người dùng bị đăng xuất dù đã tích "Lưu đăng nhập".

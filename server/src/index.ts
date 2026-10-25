@@ -55,8 +55,19 @@ app.use(
       : false,
   }),
 )
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') ?? true }))
-app.use(express.json({ limit: '1mb' }))
+// Production cùng origin (nginx → app) nên không cần CORS; thiếu CORS_ORIGIN thì tắt
+// thay vì phản chiếu mọi origin. Dev vẫn mở để Vite/công cụ khác gọi được.
+app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map((o) => o.trim()).filter(Boolean) ?? !isProd }))
+app.use(express.json({
+  limit: '1mb',
+  // Webhook SmartCA ký HMAC trên đúng bytes gửi tới — giữ raw body cho route đó,
+  // vì JSON.stringify(req.body) có thể khác thứ tự key/khoảng trắng.
+  verify: (req, _res, buf) => {
+    if ((req as express.Request).originalUrl?.startsWith('/api/hse/smartca/callback')) {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf)
+    }
+  },
+}))
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'atld-api' }))
 app.use('/api/auth', authRouter)
@@ -78,10 +89,15 @@ app.use('/api/admin', adminRouter)
 app.use('/api/config', configRouter)
 app.use('/api/media', mediaRouter)
 
-// Serve uploads tĩnh (video, media, content) — không cần auth để stream trong <video>/<iframe>
-app.use('/uploads', express.static(
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
-))
+// Chỉ ảnh nhận diện (media/) và ảnh chèn bài viết (content/) là công khai — giữ đường
+// /uploads/... cho link cũ còn trong DB (link mới đi qua /api/media). Các thư mục khác
+// (hse/ giấy tờ NLĐ, trainee/ ảnh học viên, certs/, tài liệu ở gốc) CHỈ tải qua endpoint
+// có auth + siteScope, nên mọi đường /uploads khác trả 404.
+const UPLOADS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
+for (const pub of ['media', 'content']) {
+  app.use(`/uploads/${pub}`, express.static(path.join(UPLOADS_ROOT, pub), { index: false, dotfiles: 'deny' }))
+}
+app.use('/uploads', (_req, res) => res.status(404).end())
 
 // Production: phục vụ bản build React (frontend) từ cùng máy chủ này.
 // dist backend nằm ở server/dist, build frontend nằm ở gốc dự án ../../dist.

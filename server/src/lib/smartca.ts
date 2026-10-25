@@ -177,7 +177,8 @@ export async function getSignStatus(txId: string): Promise<SigningResult> {
  */
 export async function verifyWebhookSignature(rawBody: string, signature: string): Promise<boolean> {
   const cfg = await loadSmartCaConfig()
-  if (!cfg) return false
+  // Secret rỗng → ai cũng tự tính được HMAC hợp lệ, nên từ chối luôn.
+  if (!cfg || !cfg.webhookSecret || !signature) return false
   const expected = createHmac('sha256', cfg.webhookSecret)
     .update(rawBody, 'utf8')
     .digest('hex')

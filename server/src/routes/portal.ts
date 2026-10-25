@@ -35,9 +35,8 @@ export const hashToken = (raw: string) =>
 
 /**
  * Giới hạn theo IP cho toàn cổng công khai, chống dò token.
- * Lưu ý: app chưa đặt 'trust proxy', nên sau nginx mọi request mang IP của proxy và
- * hạn mức này thành hạn mức chung. Vẫn giữ vì nó chặn được dò token ở mức tổng,
- * còn chặn theo từng token thì đã có max_uses trong DB.
+ * App đặt 'trust proxy' = 1 (index.ts) nên req.ip là IP thật của client sau nginx.
+ * Chặn theo từng token thì đã có max_uses trong DB.
  */
 const portalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,

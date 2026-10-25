@@ -1,11 +1,11 @@
 import { Router } from 'express'
 import crypto from 'node:crypto'
 import { query } from '../db.js'
-import { signToken, type AuthUser, type Role, type CmsSection } from '../auth.js'
+import { signToken, JWT_SECRET, type AuthUser, type Role, type CmsSection } from '../auth.js'
 
 export const oauthRouter = Router()
 
-const SECRET = process.env.JWT_SECRET || 'dev_secret'
+const SECRET = JWT_SECRET
 
 // ── State CSRF helpers ────────────────────────────────────────────────────────
 // Tạo state token chống CSRF: encode (from|timestamp|hmac) → base64url

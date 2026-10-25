@@ -59,6 +59,13 @@ function SectionGuard({ section, children }: { section: CmsSection; children: Re
   return <>{children}</>
 }
 
+// Trang cấu hình hệ thống (LDAP, SmartCA) chỉ dành cho admin — server cũng chặn bằng requireRole('admin').
+function AdminGuard({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  if (user?.role !== 'admin') return <Navigate to="/cms" replace />
+  return <>{children}</>
+}
+
 function PublicShell() {
   return (
     <div className="flex min-h-screen flex-col">
@@ -101,8 +108,8 @@ export default function App() {
         <Route path="muc-tieu" element={<SectionGuard section="muc-tieu"><GoalsManager /></SectionGuard>} />
         <Route path="menu" element={<SectionGuard section="menu"><MenuManager /></SectionGuard>} />
         <Route path="trang-tinh" element={<SectionGuard section="trang-tinh"><SiteSettings /></SectionGuard>} />
-        <Route path="ldap" element={<LdapConfigPage />} />
-        <Route path="smartca" element={<SmartCAConfigPage />} />
+        <Route path="ldap" element={<AdminGuard><LdapConfigPage /></AdminGuard>} />
+        <Route path="smartca" element={<AdminGuard><SmartCAConfigPage /></AdminGuard>} />
       </Route>
 
       {/* Cổng khai báo cho nhà thầu — mở bằng link có token, KHÔNG cần đăng nhập.

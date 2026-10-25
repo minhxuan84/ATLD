@@ -3084,8 +3084,9 @@ hseRouter.get('/commitments/:id/smartca/status', requireAuth, async (req, res) =
 /** POST /hse/smartca/callback — Webhook từ VNPT SmartCA (HMAC-verified) */
 hseRouter.post('/smartca/callback', async (req, res) => {
   const sig = String(req.headers['x-smartca-signature'] ?? '')
-  const rawBody = JSON.stringify(req.body)
-  if (!(await verifyWebhookSignature(rawBody, sig))) {
+  // rawBody do express.json({ verify }) ở index.ts giữ lại; thiếu (sai Content-Type) → từ chối.
+  const raw = (req as typeof req & { rawBody?: Buffer }).rawBody
+  if (!raw || !(await verifyWebhookSignature(raw.toString('utf8'), sig))) {
     return res.status(401).json({ error: 'Chữ ký webhook không hợp lệ.' })
   }
   const { transactionId, status, signature, certSerial, certSubject } = req.body ?? {}
