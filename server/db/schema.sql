@@ -71,9 +71,14 @@ CREATE TABLE IF NOT EXISTS atld.quiz_fields (
   id         SERIAL PRIMARY KEY,
   field_key  VARCHAR(40) UNIQUE NOT NULL,
   label      VARCHAR(120) NOT NULL,
-  type       VARCHAR(20) NOT NULL DEFAULT 'text' CHECK (type IN ('text','select')),
+  type       VARCHAR(20) NOT NULL DEFAULT 'text' CHECK (type IN ('text','select','image')),
   options    JSONB NOT NULL DEFAULT '[]',
   required   BOOLEAN NOT NULL DEFAULT true,
+  -- Vai trò trong hồ sơ đào tạo: full_name in lên chứng nhận, photo là ảnh bên trái
+  -- chứng nhận, id_number để đếm số lần thi của học viên vào bằng QR. Đánh dấu tường
+  -- minh vì mã trường do admin tự đặt, dò theo tên là sẽ sai.
+  purpose    VARCHAR(20) NOT NULL DEFAULT 'none'
+               CHECK (purpose IN ('none','full_name','id_number','photo')),
   sort_order INT NOT NULL DEFAULT 0
 );
 

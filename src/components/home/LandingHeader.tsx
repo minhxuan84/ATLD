@@ -39,7 +39,7 @@ export default function LandingHeader({ solid }: { solid: boolean }) {
             <LayoutGrid className="h-5 w-5" /> <span className="hidden sm:inline">Hệ thống huấn luyện</span>
           </Link>
           {hasCmsAccess(user) && (
-            <Link to="/cms" className="inline-flex items-center gap-2 rounded-lg bg-hatien-500 px-3 py-2 text-sm font-semibold text-white hover:bg-hatien-600 sm:px-4 sm:py-2.5 sm:text-base">
+            <Link to="/cms" className="inline-flex items-center gap-2 rounded-lg bg-eco-600 px-3 py-2 text-sm font-semibold text-white hover:bg-eco-700 sm:px-4 sm:py-2.5 sm:text-base">
               <Settings className="h-5 w-5" /> <span className="hidden sm:inline">CMS</span>
             </Link>
           )}

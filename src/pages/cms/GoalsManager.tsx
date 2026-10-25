@@ -78,7 +78,7 @@ export default function GoalsManager() {
                 </div>
               ) : (
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${g.scope === 'year' ? 'bg-vicem-100 text-vicem-700' : 'bg-hatien-100 text-hatien-700'}`}>{g.scope === 'year' ? 'Năm' : 'Tháng'}</span>
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${g.scope === 'year' ? 'bg-vicem-100 text-vicem-700' : 'bg-eco-100 text-eco-700'}`}>{g.scope === 'year' ? 'Năm' : 'Tháng'}</span>
                   <div className="min-w-0 flex-1">
                     <p className="font-medium text-slate-700">{g.title}</p>
                     <p className="text-xs text-slate-400">{g.target}</p>

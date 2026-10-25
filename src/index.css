@@ -50,9 +50,11 @@ body {
   .animate-float-slower { animation: float-slower 9s ease-in-out infinite; }
   .animate-aurora { animation: aurora 16s ease-in-out infinite; }
 
-  /* Chữ tô gradient đúng nhận diện: xanh VICEM -> đỏ HÀ TIÊN */
+  /* Chữ tô gradient trên banner: trắng -> xanh VICEM -> xanh lá môi trường.
+     Dùng eco-300 (#7adda6) chứ không phải eco-500: chữ nằm trên ảnh nền nên tông
+     đậm sẽ chìm, nhất là sau khi đã hạ độ mờ của lớp phủ. */
   .text-gradient {
-    background: linear-gradient(100deg, #ffffff 0%, #99c1df 40%, #E2231A 100%);
+    background: linear-gradient(100deg, #ffffff 0%, #99c1df 40%, #7adda6 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;

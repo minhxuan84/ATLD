@@ -5,10 +5,8 @@ import { useConfig } from '../context/ConfigContext'
 export default function Logo({ className = '', size = 'md' }: { className?: string; size?: 'md' | 'lg' }) {
   const { config } = useConfig()
   const box = size === 'lg' ? 48 : 40
-  const vicemText = size === 'lg' ? 'text-2xl' : 'text-lg'
-  const hatienText = size === 'lg' ? 'text-base' : 'text-sm'
   return (
-    <span className={`flex items-center gap-2.5 ${className}`} aria-label={`${config.brand_name_top} ${config.brand_name_bottom}`}>
+    <span className={`flex items-center ${className}`} aria-label={`${config.brand_name_top} ${config.brand_name_bottom}`}>
       {/* Logo: ảnh tải lên nếu có, ngược lại dùng biểu trưng SVG mặc định */}
       {config.logo_url ? (
         <img src={config.logo_url} alt={`${config.brand_name_top} ${config.brand_name_bottom}`} height={box} className="shrink-0 object-contain" style={{ height: box }} />
@@ -20,11 +18,6 @@ export default function Logo({ className = '', size = 'md' }: { className?: stri
           <path d="M16 10 L22 26 L25 26 L19 10 Z" fill="#fff" opacity="0.85" />
         </svg>
       )}
-      {/* Chữ thương hiệu (đọc từ cấu hình site) */}
-      <span className="leading-none">
-        <span className={`block ${vicemText} font-extrabold tracking-tight text-vicem-500`}>{config.brand_name_top}</span>
-        <span className={`block ${hatienText} font-bold tracking-wide text-hatien-500`}>{config.brand_name_bottom}</span>
-      </span>
     </span>
   )
 }

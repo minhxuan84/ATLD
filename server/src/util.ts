@@ -37,6 +37,14 @@ export function decodeEntities(input: string): string {
       Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : m)
 }
 
+// Tạo tóm tắt từ HTML: bỏ thẻ, decode entity, cắt gọn ở 160 ký tự.
+// Dùng chung ở news.ts (ghi tay) và newsFetch.ts (RSS).
+export function makeExcerpt(html: string): string {
+  const stripped = html.replace(/<[^>]+>/g, ' ')
+  const text = decodeEntities(stripped).replace(/\s+/g, ' ').trim()
+  return text.slice(0, 160) + (text.length > 160 ? '…' : '')
+}
+
 // Làm sạch tên file: bỏ path traversal và ký tự nguy hiểm
 export function sanitizeFileName(name: string): string {
   return name

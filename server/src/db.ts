@@ -1,6 +1,10 @@
 import 'dotenv/config'
 import pg from 'pg'
 
+// Giữ cột DATE dạng chuỗi ISO "yyyy-mm-dd" thay vì Date object
+// (mặc định pg parse DATE → Date, String(date).slice(0,10) cho "Mon Jul 19" → so sánh sai)
+pg.types.setTypeParser(1082, (v) => v)
+
 const schema = process.env.PGSCHEMA || 'atld'
 
 // Đặt search_path về schema atld ngay ở tham số kết nối (không chạm public.*)

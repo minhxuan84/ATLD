@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
-import { Plus, Trash2, ChevronDown, ChevronRight, Check, Pencil, X, Award, Sparkles, Loader2 } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, Pencil, X, Award, Sparkles, Loader2, QrCode, Link2, DownloadCloud } from 'lucide-react'
+import { fmtDate } from '../../lib/date'
 
 interface CourseRow {
   id: string
@@ -14,6 +15,8 @@ interface CourseRow {
   summary: string[]
   pass_score: number
   question_count: number
+  validity_months: number | null
+  max_attempts: number
 }
 interface QuestionRow {
   id: number
@@ -23,15 +26,51 @@ interface QuestionRow {
 }
 interface Branch { id: number; name: string }
 interface CertRow {
+  id: number
   cert_id: string
-  quiz_score: number
-  full_name: string
-  date: string | null
-  trainee_info: Record<string, string> | null
+  trainee_name: string
+  score: number
+  issued_at: string
+  expires_at: string | null
+  source: 'account' | 'portal'
+  cert_pdf: string | null
+  download_key: string
+  attempt_id: number | null
+  attempt_key: string | null
+  detail_pdf: string | null
+  username: string | null
+}
+interface TokenRow {
+  id: number
+  label: string | null
+  expires_at: string
+  max_uses: number | null
+  used_count: number
+  created_at: string
+  created_by_name: string | null
+  active: boolean
 }
 type QuestionDraft = { text: string; options: string[]; correct_index: number }
 
 const emptyQuestion = (): QuestionDraft => ({ text: '', options: ['', '', '', ''], correct_index: 0 })
+
+/** Biểu tượng một bước trong thanh tiến trình AI sinh nội dung */
+function AiStepBadge({ label, status }: { label: string; status: 'waiting' | 'running' | 'done' | 'error' }) {
+  return (
+    <div className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+      status === 'done'    ? 'bg-emerald-100 text-emerald-700' :
+      status === 'running' ? 'bg-vicem-100 text-vicem-700' :
+      status === 'error'   ? 'bg-red-100 text-red-600' :
+                             'bg-slate-100 text-slate-400'
+    }`}>
+      {status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
+      {status === 'done'    && <Check   className="h-3 w-3" />}
+      {status === 'error'   && <X       className="h-3 w-3" />}
+      {status === 'waiting' && <span className="inline-block h-2 w-2 rounded-full bg-slate-300" />}
+      {label}
+    </div>
+  )
+}
 
 export default function CoursesManager() {
   const [courses, setCourses] = useState<CourseRow[]>([])
@@ -39,20 +78,29 @@ export default function CoursesManager() {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [questions, setQuestions] = useState<Record<string, QuestionRow[]>>({})
   const [certs, setCerts] = useState<Record<string, CertRow[]>>({})
+  const [tokens, setTokens] = useState<Record<string, TokenRow[]>>({})
+  const [tokenForm, setTokenForm] = useState({ label: '', days: '30', maxUses: '' })
+  const [tokenBusy, setTokenBusy] = useState(false)
+  const [createdToken, setCreatedToken] = useState<{
+    courseId: string; id: number; token: string; expiresInDays: number; qrUrl: string
+  } | null>(null)
   const [showNew, setShowNew] = useState(false)
   const [error, setError] = useState('')
 
-  const [newCourse, setNewCourse] = useState({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, summary: '' })
+  const [newCourse, setNewCourse] = useState({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', max_attempts: '', summary: '' })
   const [newQ, setNewQ] = useState<QuestionDraft>(emptyQuestion())
 
   // AI sinh nội dung khóa học từ prompt
   const [aiTopic, setAiTopic] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [aiQuestions, setAiQuestions] = useState<QuestionDraft[]>([])
+  // Cấu hình + theo dõi tiến trình AI
+  const [aiQuestionCount, setAiQuestionCount] = useState(8)
+  const [aiStep, setAiStep] = useState<null | 'content' | 'done' | 'error'>(null)
 
   // Sửa khóa học
   const [editCourse, setEditCourse] = useState<string | null>(null)
-  const [courseDraft, setCourseDraft] = useState({ title: '', description: '', grp: '', branch_id: '', video_url: '', duration: '', pass_score: 80, summary: '' })
+  const [courseDraft, setCourseDraft] = useState({ title: '', description: '', grp: '', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', max_attempts: '', summary: '' })
   // Sửa câu hỏi
   const [editQ, setEditQ] = useState<number | null>(null)
   const [qDraft, setQDraft] = useState<QuestionDraft>(emptyQuestion())
@@ -69,8 +117,37 @@ export default function CoursesManager() {
   }
 
   const reloadCerts = async (courseId: string) => {
-    const d = await api<{ certificates: CertRow[] }>(`/admin/courses/${courseId}/certificates`)
+    const d = await api<{ certificates: CertRow[] }>(`/admin/courses/${courseId}/quiz-certificates`)
     setCerts((c) => ({ ...c, [courseId]: d.certificates }))
+  }
+
+  const reloadTokens = async (courseId: string) => {
+    const d = await api<{ tokens: TokenRow[] }>(`/admin/courses/${courseId}/quiz-tokens`)
+    setTokens((t) => ({ ...t, [courseId]: d.tokens }))
+  }
+
+  const createToken = async (courseId: string) => {
+    setTokenBusy(true)
+    try {
+      const r = await api<{ id: number; token: string; expires_in_days: number }>(
+        `/admin/courses/${courseId}/quiz-tokens`,
+        { method: 'POST', body: { label: tokenForm.label || null, days: Number(tokenForm.days) || 30, max_uses: tokenForm.maxUses ? Number(tokenForm.maxUses) : null } },
+      )
+      const url = `${window.location.origin}/thi/${r.token}`
+      const { default: QRCode } = await import('qrcode')
+      const qrUrl = await QRCode.toDataURL(url, { margin: 1, width: 256 })
+      setCreatedToken({ courseId, id: r.id, token: r.token, expiresInDays: r.expires_in_days, qrUrl })
+      setTokenForm({ label: '', days: '30', maxUses: '' })
+      await reloadTokens(courseId)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Tạo link thất bại.')
+    } finally { setTokenBusy(false) }
+  }
+
+  const revokeToken = async (courseId: string, tokenId: number) => {
+    if (!confirm('Thu hồi link thi này? Học viên đang dùng link sẽ bị chặn.')) return
+    await api(`/admin/courses/${courseId}/quiz-tokens/${tokenId}`, { method: 'DELETE' })
+    await reloadTokens(courseId)
   }
 
   const toggle = async (id: string) => {
@@ -78,6 +155,7 @@ export default function CoursesManager() {
     setExpanded(id)
     if (!questions[id]) await reloadQuestions(id)
     if (!certs[id]) await reloadCerts(id).catch(() => {})
+    if (!tokens[id]) await reloadTokens(id).catch(() => {})
   }
 
   const createCourse = async (e: React.FormEvent) => {
@@ -97,9 +175,10 @@ export default function CoursesManager() {
         })
       }
       setShowNew(false)
-      setNewCourse({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, summary: '' })
+      setNewCourse({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', max_attempts: '', summary: '' })
       setAiQuestions([])
       setAiTopic('')
+      setAiStep(null)
       fetchCourses()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Tạo khóa học thất bại.')
@@ -109,19 +188,20 @@ export default function CoursesManager() {
   // Gọi AI sinh nội dung, tự điền vào form (giữ mã khóa học admin đã nhập)
   const aiGenerate = async () => {
     if (aiTopic.trim().length < 3) { setError('Nhập chủ đề để AI soạn nội dung.'); return }
-    setAiLoading(true); setError('')
+    setAiLoading(true); setAiStep('content'); setError('')
     try {
-      const { course } = await api<{ course: {
-        title: string; description: string; grp: string; duration: string
-        summary: string[]; questions: QuestionDraft[]
-      } }>('/admin/courses/ai-generate', { method: 'POST', body: { topic: aiTopic } })
+      const { course } = await api<{
+        course: { title: string; description: string; grp: string; duration: string; summary: string[]; questions: QuestionDraft[] }
+      }>('/admin/courses/ai-generate', { method: 'POST', body: { topic: aiTopic, questionCount: aiQuestionCount } })
       setNewCourse((c) => ({
         ...c,
         title: course.title, description: course.description, grp: course.grp || c.grp,
         duration: course.duration, summary: course.summary.join('\n'),
       }))
       setAiQuestions(course.questions ?? [])
+      setAiStep('done')
     } catch (err) {
+      setAiStep('error')
       setError(err instanceof Error ? err.message : 'AI sinh nội dung thất bại.')
     } finally { setAiLoading(false) }
   }
@@ -130,7 +210,11 @@ export default function CoursesManager() {
     setEditCourse(c.id)
     setCourseDraft({
       title: c.title, description: c.description, grp: c.grp, branch_id: c.branch_id ? String(c.branch_id) : '',
-      video_url: c.video_url, duration: c.duration, pass_score: c.pass_score, summary: (c.summary ?? []).join('\n'),
+      video_url: c.video_url, duration: c.duration, pass_score: c.pass_score,
+      validity_months: c.validity_months == null ? '' : String(c.validity_months),
+      // 0 = không giới hạn, hiển thị thành ô trống cho khớp placeholder.
+      max_attempts: !c.max_attempts ? '' : String(c.max_attempts),
+      summary: (c.summary ?? []).join('\n'),
     })
   }
   const saveCourse = async (id: string) => {
@@ -190,29 +274,59 @@ export default function CoursesManager() {
       {showNew && (
         <form onSubmit={createCourse} className="mt-4 grid gap-3 rounded-2xl border border-slate-200 bg-white p-5 sm:grid-cols-2">
           {/* ── Khu vực AI sinh nội dung ── */}
-          <div className="sm:col-span-2 flex gap-2 rounded-xl bg-vicem-50 p-3 items-start">
-            <Sparkles className="mt-2 h-5 w-5 shrink-0 text-vicem-600" aria-hidden />
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-vicem-800">Tạo nội dung bằng AI</p>
-              <p className="text-xs text-vicem-600 mb-2">Nhập chủ đề, AI sẽ tự soạn tên, mô tả, tóm tắt và câu hỏi trắc nghiệm.</p>
-              <div className="flex gap-2">
-                <input
-                  value={aiTopic}
-                  onChange={(e) => setAiTopic(e.target.value)}
-                  placeholder="Vd: An toàn khi làm việc trên cao, Phòng chống cháy nổ…"
-                  className="flex-1 rounded-lg border border-vicem-200 bg-white px-3 py-1.5 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
-                />
-                <button
-                  type="button" onClick={aiGenerate} disabled={aiLoading}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-vicem-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-vicem-700 disabled:opacity-60"
-                >
-                  {aiLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  {aiLoading ? 'Đang tạo…' : 'Sinh nội dung'}
-                </button>
+          <div className="sm:col-span-2 rounded-xl bg-vicem-50 p-3">
+            <div className="flex items-start gap-2">
+              <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-vicem-600" aria-hidden />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-vicem-800">Tạo nội dung bằng AI</p>
+                <p className="text-xs text-vicem-600 mb-2">Nhập chủ đề, AI sẽ soạn nội dung và câu hỏi để bạn xem lại trước khi lưu. Video nhập link ở ô bên dưới.</p>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    value={aiTopic}
+                    onChange={(e) => setAiTopic(e.target.value)}
+                    placeholder="Vd: An toàn khi làm việc trên cao, Phòng chống cháy nổ…"
+                    className="min-w-0 flex-1 rounded-lg border border-vicem-200 bg-white px-3 py-1.5 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
+                  />
+                  {/* Cấu hình số câu hỏi */}
+                  <div className="flex items-center gap-1.5 rounded-lg border border-vicem-200 bg-white px-2.5 py-1.5">
+                    <label htmlFor="ai-q-count" className="text-xs text-slate-500 whitespace-nowrap">Số câu hỏi</label>
+                    <input
+                      id="ai-q-count" type="number" min={3} max={20}
+                      value={aiQuestionCount}
+                      onChange={(e) => setAiQuestionCount(Math.max(3, Math.min(20, Number(e.target.value) || 8)))}
+                      className="w-12 rounded border border-slate-200 px-1 py-0.5 text-center text-sm font-semibold text-vicem-700 focus:border-vicem-400 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="button" onClick={aiGenerate} disabled={aiLoading}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-vicem-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-vicem-700 disabled:opacity-60"
+                  >
+                    {aiLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                    {aiLoading ? 'Đang xử lý…' : 'Sinh nội dung'}
+                  </button>
+                </div>
+
+                {/* Tiến trình 2 bước */}
+                {aiStep !== null && (
+                  <div className="mt-3 flex flex-wrap items-center gap-1">
+                    <AiStepBadge
+                      label="Soạn nội dung"
+                      status={aiStep === 'content' ? 'running' : aiStep === 'error' ? 'error' : 'done'}
+                    />
+                    <div className="h-px w-4 shrink-0 bg-slate-200" />
+                    <AiStepBadge
+                      label={`${aiQuestions.length > 0 ? aiQuestions.length : aiQuestionCount} câu hỏi`}
+                      status={aiStep === 'content' ? 'waiting' : aiStep === 'error' ? 'error' : 'done'}
+                    />
+                    {aiStep === 'done' && (
+                      <span className="ml-1 text-xs font-medium text-emerald-600">✓ Đã điền vào form, xem lại trước khi lưu</span>
+                    )}
+                    {aiStep === 'error' && (
+                      <span className="ml-1 text-xs text-red-600">Có lỗi — thử lại.</span>
+                    )}
+                  </div>
+                )}
               </div>
-              {aiQuestions.length > 0 && (
-                <p className="mt-1.5 text-xs text-emerald-700">✓ AI đã soạn {aiQuestions.length} câu hỏi — sẽ được lưu tự động khi tạo khóa học.</p>
-              )}
             </div>
           </div>
 
@@ -226,6 +340,12 @@ export default function CoursesManager() {
           <input value={newCourse.duration} onChange={(e) => setNewCourse({ ...newCourse, duration: e.target.value })} placeholder="Thời lượng (vd: 25 phút)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
           <input value={newCourse.video_url} onChange={(e) => setNewCourse({ ...newCourse, video_url: e.target.value })} placeholder="URL video nhúng (embed)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           <input type="number" value={newCourse.pass_score} onChange={(e) => setNewCourse({ ...newCourse, pass_score: Number(e.target.value) })} placeholder="Điểm đạt (%)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          {/* Để trống = chứng chỉ không hết hạn. Hạn tính từ ngày đạt, dùng cho cảnh báo
+              và cho đối chiếu khóa học JSA khi kiểm tra ATMT. */}
+          <input type="number" min={0} value={newCourse.validity_months} onChange={(e) => setNewCourse({ ...newCourse, validity_months: e.target.value })} placeholder="Thời hạn chứng chỉ (tháng, trống = vô hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          {/* Trống = không giới hạn. Hết số lần mà vẫn chưa đạt thì hồ sơ NLĐ tương ứng
+              (đối chiếu theo CCCD) bị từ chối cấp quyền vào nhà máy. */}
+          <input type="number" min={0} max={20} value={newCourse.max_attempts} onChange={(e) => setNewCourse({ ...newCourse, max_attempts: e.target.value })} placeholder="Số lần thi tối đa (trống = không giới hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           <textarea value={newCourse.description} onChange={(e) => setNewCourse({ ...newCourse, description: e.target.value })} placeholder="Mô tả" rows={2} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           <textarea value={newCourse.summary} onChange={(e) => setNewCourse({ ...newCourse, summary: e.target.value })} placeholder="Tóm tắt nội dung (mỗi dòng 1 ý)" rows={3} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
           {error && <p className="text-sm text-red-600 sm:col-span-2">{error}</p>}
@@ -244,8 +364,21 @@ export default function CoursesManager() {
               </button>
               <div className="min-w-0 flex-1">
                 <p className="font-semibold text-slate-800">{c.title}</p>
-                <p className="text-xs text-slate-400">{c.id} · {c.branch_name ?? 'Chưa phân loại'} · {c.grp} · {c.question_count} câu hỏi · đạt ≥ {c.pass_score}%</p>
+                <p className="text-xs text-slate-400">
+                  {c.id} · {c.branch_name ?? 'Chưa phân loại'} · {c.grp} · {c.question_count} câu hỏi · đạt ≥ {c.pass_score}%
+                  {c.max_attempts > 0 && ` · tối đa ${c.max_attempts} lần thi`}
+                </p>
               </div>
+              {/* Lối tắt tới khối "Link QR thi" — khối đó nằm trong phần mở rộng nên dễ bị bỏ sót. */}
+              <button
+                onClick={async () => {
+                  if (expanded !== c.id) await toggle(c.id)
+                  document.getElementById(`qr-${c.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                }}
+                className="inline-flex items-center gap-1 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-700 hover:bg-sky-100"
+              >
+                <QrCode className="h-3.5 w-3.5" /> QR thi
+              </button>
               <button onClick={() => startEditCourse(c)} className="rounded p-1.5 text-slate-400 hover:bg-vicem-50 hover:text-vicem-600" aria-label={`Sửa khóa học ${c.title}`}><Pencil className="h-4 w-4" /></button>
               <button onClick={() => deleteCourse(c.id)} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label="Xóa khóa học"><Trash2 className="h-4 w-4" /></button>
             </div>
@@ -262,6 +395,8 @@ export default function CoursesManager() {
                   </select>
                   <input value={courseDraft.duration} onChange={(e) => setCourseDraft({ ...courseDraft, duration: e.target.value })} placeholder="Thời lượng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
                   <input type="number" value={courseDraft.pass_score} onChange={(e) => setCourseDraft({ ...courseDraft, pass_score: Number(e.target.value) })} placeholder="Điểm đạt (%)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                  <input type="number" min={0} value={courseDraft.validity_months} onChange={(e) => setCourseDraft({ ...courseDraft, validity_months: e.target.value })} placeholder="Thời hạn chứng chỉ (tháng, trống = vô hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                  <input type="number" min={0} max={20} value={courseDraft.max_attempts} onChange={(e) => setCourseDraft({ ...courseDraft, max_attempts: e.target.value })} placeholder="Số lần thi tối đa (trống = không giới hạn)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <input value={courseDraft.video_url} onChange={(e) => setCourseDraft({ ...courseDraft, video_url: e.target.value })} placeholder="URL video nhúng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <textarea value={courseDraft.description} onChange={(e) => setCourseDraft({ ...courseDraft, description: e.target.value })} placeholder="Mô tả" rows={2} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <textarea value={courseDraft.summary} onChange={(e) => setCourseDraft({ ...courseDraft, summary: e.target.value })} placeholder="Tóm tắt nội dung (mỗi dòng 1 ý)" rows={3} className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
@@ -311,32 +446,141 @@ export default function CoursesManager() {
                     onSave={() => addQuestion(c.id)} saveLabel="Thêm câu hỏi" />
                 </div>
 
-                {/* Lịch sử chứng chỉ đã đạt của khóa học này */}
+                {/* ─ Link QR thi tại hiện trường (Pha H6) ─ */}
+                <div id={`qr-${c.id}`} className="mt-5 scroll-mt-4">
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                    <QrCode className="h-4 w-4 text-sky-600" /> Link QR thi tại hiện trường
+                    <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">
+                      {(tokens[c.id] ?? []).filter((t) => t.active).length} đang hoạt động
+                    </span>
+                  </h3>
+
+                  {/* Token vừa tạo — kèm QR và nút sao chép. Token thô chỉ trả về đúng lần
+                      tạo, nên phải lưu QR ngay; đóng thông báo này là hết. */}
+                  {createdToken?.courseId === c.id && (
+                    <div className="mt-3 rounded-xl border border-emerald-300 bg-emerald-50 p-4">
+                      <div className="flex items-start gap-4">
+                        <img src={createdToken.qrUrl} alt="QR code" className="h-32 w-32 rounded border border-emerald-200" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-emerald-800">Link thi đã tạo</p>
+                          <p className="mt-0.5 text-xs font-medium text-amber-700">⚠ Lưu QR ngay — không hiển thị lại sau khi đóng.</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button type="button"
+                              onClick={() => navigator.clipboard?.writeText(`${window.location.origin}/thi/${createdToken.token}`)}
+                              className="inline-flex items-center gap-1.5 rounded border border-emerald-400 bg-white px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100">
+                              <Link2 className="h-3.5 w-3.5" /> Sao chép link
+                            </button>
+                            <a href={createdToken.qrUrl} download={`qr-thi-${createdToken.courseId}.png`}
+                              className="inline-flex items-center gap-1.5 rounded border border-emerald-400 bg-white px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100">
+                              <DownloadCloud className="h-3.5 w-3.5" /> Tải ảnh QR
+                            </a>
+                          </div>
+                          <p className="mt-2 text-xs text-slate-500">Hết hạn sau {createdToken.expiresInDays} ngày</p>
+                        </div>
+                      </div>
+                      <button type="button" onClick={() => setCreatedToken(null)}
+                        className="mt-3 text-xs text-slate-400 underline hover:text-slate-600">
+                        Đóng thông báo này
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Form tạo token */}
+                  <div className="mt-3 grid grid-cols-3 gap-2">
+                    <input value={tokenForm.label} onChange={(e) => setTokenForm({ ...tokenForm, label: e.target.value })} placeholder="Nhãn (tùy chọn)" className="col-span-3 rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-1" />
+                    <input type="number" min={1} max={180} value={tokenForm.days} onChange={(e) => setTokenForm({ ...tokenForm, days: e.target.value })} placeholder="Hạn dùng (ngày)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                    <input type="number" min={1} max={10000} value={tokenForm.maxUses} onChange={(e) => setTokenForm({ ...tokenForm, maxUses: e.target.value })} placeholder="Số lượt (trống = ∞)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                    <button type="button" onClick={() => createToken(c.id)} disabled={tokenBusy}
+                      className="col-span-3 inline-flex items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-60 sm:col-span-1">
+                      {tokenBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <QrCode className="h-4 w-4" />}
+                      Tạo link QR
+                    </button>
+                  </div>
+
+                  {/* Danh sách link đã tạo */}
+                  {(tokens[c.id] ?? []).length > 0 && (
+                    <div className="mt-3 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-500">
+                          <tr>
+                            <th className="px-3 py-2 font-semibold">Nhãn</th>
+                            <th className="px-3 py-2 font-semibold">Hết hạn</th>
+                            <th className="px-3 py-2 font-semibold">Lượt dùng</th>
+                            <th className="px-3 py-2 font-semibold">Trạng thái</th>
+                            <th className="px-3 py-2" />
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {(tokens[c.id] ?? []).map((tk) => (
+                            <tr key={tk.id}>
+                              <td className="px-3 py-2 text-slate-700">{tk.label ?? <span className="text-slate-400 italic">—</span>}</td>
+                              <td className="px-3 py-2 text-slate-500">{fmtDate(tk.expires_at)}</td>
+                              <td className="px-3 py-2">{tk.used_count}{tk.max_uses !== null ? ` / ${tk.max_uses}` : ''}</td>
+                              <td className="px-3 py-2">
+                                <span className={`rounded-full px-2 py-0.5 font-medium ${tk.active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
+                                  {tk.active ? 'Hoạt động' : 'Đã đóng'}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2">
+                                {tk.active && (
+                                  <button onClick={() => revokeToken(c.id, tk.id)} className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label="Thu hồi link">
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Chứng nhận đã cấp của khóa — cả hai lối vào (tài khoản và QR) */}
                 <div className="mt-5">
                   <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-                    <Award className="h-4 w-4 text-emerald-600" /> Lịch sử chứng chỉ đã đạt
+                    <Award className="h-4 w-4 text-emerald-600" /> Chứng nhận đã cấp
                     <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">{(certs[c.id] ?? []).length}</span>
                   </h3>
                   {(certs[c.id] ?? []).length === 0 ? (
                     <p className="mt-2 rounded-lg border border-dashed border-slate-300 bg-white p-3 text-sm text-slate-400">Chưa có học viên nào đạt chứng chỉ ở khóa này.</p>
                   ) : (
                     <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
-                      <table className="w-full text-left text-sm">
-                        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-slate-500">
                           <tr>
                             <th className="px-3 py-2 font-semibold">Học viên</th>
-                            <th className="px-3 py-2 font-semibold">Mã chứng chỉ</th>
+                            <th className="px-3 py-2 font-semibold">Mã CC</th>
                             <th className="px-3 py-2 font-semibold">Điểm</th>
                             <th className="px-3 py-2 font-semibold">Ngày cấp</th>
+                            <th className="px-3 py-2 font-semibold">Nguồn</th>
+                            <th className="px-3 py-2" />
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {(certs[c.id] ?? []).map((ct) => (
                             <tr key={ct.cert_id}>
-                              <td className="px-3 py-2 font-medium text-slate-700">{ct.trainee_info?.full_name || ct.full_name}</td>
-                              <td className="px-3 py-2 font-mono text-xs text-slate-500">{ct.cert_id}</td>
-                              <td className="px-3 py-2"><span className="font-semibold text-emerald-600">{ct.quiz_score}%</span></td>
-                              <td className="px-3 py-2 text-slate-500">{ct.date ?? '—'}</td>
+                              <td className="px-3 py-2 font-medium text-slate-700">{ct.trainee_name}</td>
+                              <td className="px-3 py-2 font-mono text-slate-500">{ct.cert_id}</td>
+                              <td className="px-3 py-2"><span className="font-semibold text-emerald-600">{ct.score}%</span></td>
+                              <td className="px-3 py-2 text-slate-500">{fmtDate(ct.issued_at)}</td>
+                              <td className="px-3 py-2">
+                                <span className={`rounded px-1.5 py-0.5 font-medium ${ct.source === 'portal' ? 'bg-sky-50 text-sky-700' : 'bg-slate-100 text-slate-600'}`}>
+                                  {ct.source === 'portal' ? 'QR' : 'Tài khoản'}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="flex gap-1">
+                                  <a href={`/api/courses/certificates/${encodeURIComponent(ct.cert_id)}/pdf?k=${ct.download_key}`} target="_blank" rel="noreferrer" title="Tải chứng nhận PDF" className="rounded p-1 text-slate-400 hover:text-sky-600" aria-label="Tải chứng nhận PDF">
+                                    <Award className="h-3.5 w-3.5" />
+                                  </a>
+                                  {ct.attempt_id && ct.attempt_key && (
+                                    <a href={`/api/courses/attempts/${ct.attempt_id}/pdf?k=${ct.attempt_key}`} target="_blank" rel="noreferrer" title="Tải bài làm PDF" className="rounded p-1 text-slate-400 hover:text-emerald-600" aria-label="Tải bài làm PDF">
+                                      <DownloadCloud className="h-3.5 w-3.5" />
+                                    </a>
+                                  )}
+                                </div>
+                              </td>
                             </tr>
                           ))}
                         </tbody>

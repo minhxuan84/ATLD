@@ -21,6 +21,14 @@ FROM node:20-alpine
 ENV NODE_ENV=production
 ENV PORT=4000
 
+# font-opensans: PDF tiếng Việt (giấy phép, chứng nhận, bài làm) nhúng OpenSans từ
+# /usr/share/fonts/opensans (xem VN_FONT_CANDIDATES trong server/src/lib/pdf.ts).
+# Trước đây font này đi kèm gián tiếp theo chromium; bỏ chromium thì phải cài tường minh,
+# thiếu font PDF vẫn ra nhưng mất dấu.
+RUN apk add --no-cache \
+      ca-certificates \
+      font-opensans
+
 # Server chạy từ /app/server/dist/index.js, phục vụ client build ở /app/dist,
 # lưu ảnh vào /app/server/uploads. Giữ đúng cấu trúc này để các path tương đối khớp.
 WORKDIR /app/server
@@ -35,8 +43,10 @@ COPY --from=server-builder /app/server/dist ./dist
 # Copy client build ra /app/dist (server đọc từ ../../dist)
 COPY --from=client-builder /app/dist /app/dist
 
-# Thư mục lưu ảnh nhận diện & ảnh nội dung (persist qua volume)
-RUN mkdir -p uploads/media uploads/content && chown -R node:node /app/server/uploads
+# Thư mục lưu ảnh nhận diện, ảnh nội dung (persist qua volume).
+# uploads/videos giữ lại để video đã render trước đây (nếu có) vẫn phát được.
+RUN mkdir -p uploads/media uploads/content uploads/videos \
+    && chown -R node:node /app/server/uploads
 
 USER node
 EXPOSE 4000

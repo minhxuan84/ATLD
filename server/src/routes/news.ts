@@ -1,76 +1,296 @@
 import { Router } from 'express'
 import { query } from '../db.js'
 import { requireAuth, requireSection } from '../auth.js'
-import { escapeText, sanitizeHtml, decodeEntities } from '../util.js'
+import { escapeText, sanitizeHtml, makeExcerpt } from '../util.js'
+import { audit, clientIp } from '../lib/hse-core.js'
 
 export const newsRouter = Router()
+export const newsSourcesRouter = Router()
 
-// Tạo tóm tắt từ nội dung HTML: bỏ thẻ, GIẢI MÃ entity về ký tự thật, cắt gọn.
-// Phải decode sau khi bỏ thẻ, nếu không phần tóm tắt (hiển thị dạng text) sẽ hiện
-// entity thô như "&aacute;", "&ocirc;" thay vì "á", "ô".
-function makeExcerpt(html: string): string {
-  const stripped = html.replace(/<[^>]+>/g, ' ')
-  const text = decodeEntities(stripped).replace(/\s+/g, ' ').trim()
-  return text.slice(0, 160) + (text.length > 160 ? '…' : '')
+// ── MIGRATION tin tức (additive-only, schema atld) ──────
+// Tách khỏi khối migration lớn của hse.ts: ở đó chỉ cần một câu phía trên lỗi là cả
+// khối dừng, atld.news thiếu published_at/show_author và mọi lần đăng bài trả 500.
+// Mỗi câu chạy độc lập để một bước lỗi không kéo theo các bước sau.
+const NEWS_MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS atld.news_sources (
+     id               SERIAL PRIMARY KEY,
+     name             VARCHAR(120) NOT NULL,
+     url              VARCHAR(500) NOT NULL,
+     enabled          BOOLEAN NOT NULL DEFAULT true,
+     interval_minutes INTEGER NOT NULL DEFAULT 180,
+     category         VARCHAR(60),
+     last_fetched_at  TIMESTAMPTZ,
+     last_status      VARCHAR(20),
+     last_error       TEXT,
+     created_by       INTEGER REFERENCES atld.users(id) ON DELETE SET NULL,
+     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+   )`,
+  // status mặc định 'published' → tin đang có vẫn hiện bình thường sau deploy.
+  // Tin RSS tự lấy ghi 'draft', phải duyệt tay mới lên trang chủ.
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_id INTEGER REFERENCES atld.news_sources(id) ON DELETE SET NULL`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_url VARCHAR(500)`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS source_name VARCHAR(120)`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMPTZ`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'published'`,
+  `UPDATE atld.news SET status = 'published' WHERE status IS NULL OR status = ''`,
+  // UNIQUE source_url: NULL không bị chặn → tin gõ tay không ảnh hưởng, chỉ chống trùng RSS
+  `DO $$ BEGIN
+     ALTER TABLE atld.news ADD CONSTRAINT news_source_url_unique UNIQUE (source_url);
+   EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$`,
+  `DO $$ BEGIN
+     ALTER TABLE atld.news ADD CONSTRAINT news_status_chk CHECK (status IN ('published', 'draft'));
+   EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+  `CREATE INDEX IF NOT EXISTS idx_news_status ON atld.news(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_news_source ON atld.news(source_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_news_sources_enabled ON atld.news_sources(enabled)`,
+  // published_at tách khỏi created_at: created_at là lúc tạo bản ghi (không đổi),
+  // published_at là ngày ban hành cán bộ chọn. Backfill = created_at để tin cũ giữ ngày.
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ`,
+  `UPDATE atld.news SET published_at = created_at WHERE published_at IS NULL`,
+  `ALTER TABLE atld.news ADD COLUMN IF NOT EXISTS show_author BOOLEAN NOT NULL DEFAULT true`,
+  `CREATE INDEX IF NOT EXISTS idx_news_published_at ON atld.news(published_at DESC)`,
+]
+
+;(async () => {
+  for (const sql of NEWS_MIGRATIONS) {
+    try {
+      await query(sql)
+    } catch (e) {
+      console.error('[news migration]', (e as Error).message, '←', sql.trim().split('\n')[0])
+    }
+  }
+  console.log('[news migration] xong')
+})()
+
+// ═══════════════ CÔNG KHAI ═══════════════
+
+// Danh sách tin tức — CHỈ published. Guard này là bảo đảm quan trọng nhất của Pha I:
+// thiếu WHERE status='published' thì tin chưa duyệt lên thẳng trang chủ.
+// Ngày hiển thị = ngày ban hành (published_at), rơi về created_at với bản ghi chưa backfill.
+const NEWS_DATE = `to_char(COALESCE(published_at, created_at), 'YYYY-MM-DD')`
+
+/**
+ * Ngày ban hành do cán bộ chọn ('YYYY-MM-DD' từ <input type="date">).
+ * undefined = không gửi (giữ nguyên); null = gửi sai định dạng.
+ * Kiểm cả ngày có thật (chặn 2026-02-31) vì Postgres sẽ ném lỗi, Express 4 không bắt
+ * được lỗi async và request treo.
+ */
+function parsePublishDate(v: unknown): string | null | undefined {
+  if (v === undefined || v === null || v === '') return undefined
+  const s = String(v)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null
+  const d = new Date(`${s}T00:00:00Z`)
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null
+  const y = d.getUTCFullYear()
+  if (y < 2000 || y > 2100) return null
+  return s
 }
 
-// Danh sách tin tức (công khai cho người đã đăng nhập & trang chủ)
-// Tính lại excerpt từ content khi đọc → sửa cả tin cũ đã lưu entity thô, không cần migration.
 newsRouter.get('/', async (_req, res) => {
-  const { rows } = await query<{ id: number; title: string; category: string; excerpt: string; content: string; author: string; date: string }>(
-    `SELECT id, title, category, excerpt, content, author,
-            to_char(created_at, 'YYYY-MM-DD') AS date
-     FROM news ORDER BY created_at DESC`,
+  const { rows } = await query<{
+    id: number; title: string; category: string; excerpt: string
+    content: string; author: string | null; date: string
+  }>(
+    // Ẩn tác giả ngay ở SQL: show_author=false thì không gửi tên ra ngoài, kể cả trong JSON.
+    `SELECT id, title, category, excerpt, content,
+            CASE WHEN show_author THEN author END AS author,
+            ${NEWS_DATE} AS date
+     FROM atld.news
+     WHERE status = 'published'
+     ORDER BY COALESCE(published_at, created_at) DESC, id DESC`,
   )
   const news = rows.map((r) => ({ ...r, excerpt: makeExcerpt(r.content) }))
   res.json({ news })
 })
 
-newsRouter.get('/:id', async (req, res) => {
+// Danh sách cho CMS: đủ tác giả thật + cờ show_author để form sửa hiện đúng trạng thái.
+newsRouter.get('/manage', requireAuth, requireSection('tin-tuc'), async (_req, res) => {
   const { rows } = await query(
-    `SELECT id, title, category, excerpt, content, author,
-            to_char(created_at, 'YYYY-MM-DD') AS date
-     FROM news WHERE id = $1`,
+    `SELECT id, title, category, excerpt, content, author, show_author,
+            ${NEWS_DATE} AS date
+     FROM atld.news
+     WHERE status = 'published'
+     ORDER BY COALESCE(published_at, created_at) DESC, id DESC`,
+  )
+  res.json({ news: rows.map((r) => ({ ...r, excerpt: makeExcerpt(r.content) })) })
+})
+
+newsRouter.get('/:id', async (req, res, next) => {
+  // '/:id' khai báo trước '/drafts' nên phải nhường các đường không phải số, nếu không
+  // GET /news/drafts rơi vào đây và Postgres ném lỗi ép kiểu integer.
+  if (!/^\d+$/.test(req.params.id)) return next()
+  const { rows } = await query(
+    `SELECT id, title, category, excerpt, content,
+            CASE WHEN show_author THEN author END AS author,
+            ${NEWS_DATE} AS date
+     FROM atld.news WHERE id = $1 AND status = 'published'`,
     [req.params.id],
   )
   if (!rows[0]) return res.status(404).json({ error: 'Không tìm thấy tin.' })
   res.json({ item: rows[0] })
 })
 
-// Đăng tin — chỉ officer/admin. Nội dung là HTML từ TinyMCE -> sanitize chống XSS.
+// ═══════════════ CÁN BỘ (requireSection 'tin-tuc') ═══════════════
+
+// Đăng tin thủ công — luôn published
 newsRouter.post('/', requireAuth, requireSection('tin-tuc'), async (req, res) => {
   const title = escapeText(String(req.body?.title ?? '').trim()).slice(0, 200)
   const category = String(req.body?.category ?? 'Thông báo').slice(0, 60)
   const content = sanitizeHtml(String(req.body?.content ?? '').trim()).slice(0, 20000)
   if (!title || !content) return res.status(400).json({ error: 'Thiếu tiêu đề hoặc nội dung.' })
 
+  const publishDate = parsePublishDate(req.body?.published_at)
+  if (publishDate === null) return res.status(400).json({ error: 'Ngày ban hành không hợp lệ.' })
+  const showAuthor = req.body?.show_author !== false
+
   const excerpt = makeExcerpt(content)
   const { rows } = await query(
-    `INSERT INTO news (title, category, excerpt, content, author)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [title, category, excerpt, content, req.user!.fullName],
+    `INSERT INTO atld.news (title, category, excerpt, content, author, status, published_at, show_author)
+     VALUES ($1, $2, $3, $4, $5, 'published', COALESCE($6::date::timestamptz, now()), $7) RETURNING id`,
+    // author NOT NULL: tài khoản LDAP/OAuth có thể không mang fullName trong JWT.
+    [title, category, excerpt, content, (req.user!.fullName || req.user!.username).slice(0, 150),
+     publishDate ?? null, showAuthor],
   )
   res.status(201).json({ id: rows[0].id })
 })
 
-// Sửa tin — chỉ officer/admin
+// Sửa tin
 newsRouter.put('/:id', requireAuth, requireSection('tin-tuc'), async (req, res) => {
   const title = escapeText(String(req.body?.title ?? '').trim()).slice(0, 200)
   const category = String(req.body?.category ?? 'Thông báo').slice(0, 60)
   const content = sanitizeHtml(String(req.body?.content ?? '').trim()).slice(0, 20000)
   if (!title || !content) return res.status(400).json({ error: 'Thiếu tiêu đề hoặc nội dung.' })
 
+  const publishDate = parsePublishDate(req.body?.published_at)
+  if (publishDate === null) return res.status(400).json({ error: 'Ngày ban hành không hợp lệ.' })
+  // Không gửi thì giữ nguyên (NULL → COALESCE về giá trị cũ).
+  const showAuthor = typeof req.body?.show_author === 'boolean' ? req.body.show_author : null
+
   const excerpt = makeExcerpt(content)
   const { rowCount } = await query(
-    'UPDATE news SET title=$1, category=$2, excerpt=$3, content=$4 WHERE id=$5',
-    [title, category, excerpt, content, req.params.id],
+    `UPDATE atld.news SET title=$1, category=$2, excerpt=$3, content=$4,
+            published_at = COALESCE($6::date::timestamptz, published_at),
+            show_author  = COALESCE($7, show_author)
+     WHERE id=$5`,
+    [title, category, excerpt, content, req.params.id, publishDate ?? null, showAuthor],
   )
   if (!rowCount) return res.status(404).json({ error: 'Không tìm thấy tin.' })
   res.json({ ok: true })
 })
 
-// Xóa tin — chỉ officer/admin
+// Xóa tin
 newsRouter.delete('/:id', requireAuth, requireSection('tin-tuc'), async (req, res) => {
-  await query('DELETE FROM news WHERE id = $1', [req.params.id])
+  await query('DELETE FROM atld.news WHERE id = $1', [req.params.id])
   res.json({ ok: true })
+})
+
+// ─── Tin chờ duyệt ────────────────────────────────────────────────────────
+newsRouter.get('/drafts', requireAuth, requireSection('tin-tuc'), async (_req, res) => {
+  const { rows } = await query<{
+    id: number; title: string; category: string; excerpt: string
+    source_name: string | null; source_url: string | null; fetched_at: string | null
+    created_at: string
+  }>(
+    `SELECT n.id, n.title, n.category,
+            n.excerpt,
+            n.source_name, n.source_url,
+            to_char(n.fetched_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS fetched_at,
+            to_char(n.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
+     FROM atld.news n
+     WHERE n.status = 'draft'
+     ORDER BY n.created_at DESC
+     LIMIT 200`,
+  )
+  res.json({ drafts: rows })
+})
+
+// Duyệt một tin draft → published
+newsRouter.patch('/:id/publish', requireAuth, requireSection('tin-tuc'), async (req, res) => {
+  // Cho phép sửa tiêu đề / danh mục trước khi duyệt (tuỳ chọn, bỏ qua nếu không gửi)
+  // Tin RSS duyệt hôm nay thì ngày ban hành là hôm nay, không phải lúc bot quét về.
+  const updates: string[] = ["status = 'published'", 'published_at = now()']
+  const vals: unknown[] = []
+
+  if (req.body?.title) {
+    vals.push(escapeText(String(req.body.title).trim()).slice(0, 200))
+    updates.push(`title = $${vals.length}`)
+  }
+  if (req.body?.category) {
+    vals.push(String(req.body.category).slice(0, 60))
+    updates.push(`category = $${vals.length}`)
+  }
+
+  vals.push(req.params.id)
+  const { rowCount } = await query(
+    `UPDATE atld.news SET ${updates.join(', ')} WHERE id = $${vals.length} AND status = 'draft'`,
+    vals,
+  )
+  if (!rowCount) return res.status(404).json({ error: 'Không tìm thấy bản nháp.' })
+  await audit(req.user!, 'NEWS_PUBLISH', 'news', Number(req.params.id), null, {}, clientIp(req))
+  res.json({ ok: true })
+})
+
+// ═══════════════ NGUỒN RSS (/api/news-sources) ═══════════════
+
+newsSourcesRouter.get('/', requireAuth, requireSection('tin-tuc'), async (_req, res) => {
+  const { rows } = await query(
+    `SELECT id, name, url, enabled, interval_minutes, category,
+            to_char(last_fetched_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_fetched_at,
+            last_status, last_error,
+            to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
+     FROM atld.news_sources
+     ORDER BY created_at DESC`,
+  )
+  res.json({ sources: rows })
+})
+
+newsSourcesRouter.post('/', requireAuth, requireSection('tin-tuc'), async (req, res) => {
+  const b = req.body ?? {}
+  const name = escapeText(String(b.name ?? '').trim()).slice(0, 120)
+  const url = String(b.url ?? '').trim().slice(0, 500)
+  if (!name || !url) return res.status(400).json({ error: 'Thiếu tên hoặc URL nguồn.' })
+  if (!url.startsWith('https://')) return res.status(400).json({ error: 'Nguồn RSS phải dùng HTTPS.' })
+  const interval = Math.max(15, Math.min(1440, Number(b.interval_minutes ?? 180)))
+  const category = b.category ? String(b.category).slice(0, 60) : null
+  const { rows } = await query(
+    `INSERT INTO atld.news_sources (name, url, interval_minutes, category, created_by)
+     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    [name, url, interval, category, req.user!.id],
+  )
+  await audit(req.user!, 'NEWS_SOURCE_ADD', 'news_sources', rows[0].id, null, { name, url }, clientIp(req))
+  res.status(201).json({ id: rows[0].id })
+})
+
+newsSourcesRouter.patch('/:id', requireAuth, requireSection('tin-tuc'), async (req, res) => {
+  const b = req.body ?? {}
+  const sets: string[] = []; const vals: unknown[] = []
+  if (b.name !== undefined) { vals.push(escapeText(String(b.name).trim()).slice(0, 120)); sets.push(`name=$${vals.length}`) }
+  if (b.enabled !== undefined) { vals.push(Boolean(b.enabled)); sets.push(`enabled=$${vals.length}`) }
+  if (b.interval_minutes !== undefined) {
+    vals.push(Math.max(15, Math.min(1440, Number(b.interval_minutes))))
+    sets.push(`interval_minutes=$${vals.length}`)
+  }
+  if (b.category !== undefined) { vals.push(b.category ? String(b.category).slice(0, 60) : null); sets.push(`category=$${vals.length}`) }
+  if (!sets.length) return res.status(400).json({ error: 'Không có trường cần cập nhật.' })
+  vals.push(req.params.id)
+  const { rowCount } = await query(
+    `UPDATE atld.news_sources SET ${sets.join(', ')} WHERE id=$${vals.length}`, vals)
+  if (!rowCount) return res.status(404).json({ error: 'Không tìm thấy nguồn.' })
+  res.json({ ok: true })
+})
+
+newsSourcesRouter.delete('/:id', requireAuth, requireSection('tin-tuc'), async (req, res) => {
+  await query('DELETE FROM atld.news_sources WHERE id = $1', [req.params.id])
+  await audit(req.user!, 'NEWS_SOURCE_DELETE', 'news_sources', Number(req.params.id), null, {}, clientIp(req))
+  res.json({ ok: true })
+})
+
+// Thử quét ngay một nguồn mà không đợi hẹn giờ
+newsSourcesRouter.post('/:id/fetch-now', requireAuth, requireSection('tin-tuc'), async (req, res) => {
+  const { rows } = await query('SELECT * FROM atld.news_sources WHERE id=$1', [req.params.id])
+  if (!rows[0]) return res.status(404).json({ error: 'Không tìm thấy nguồn.' })
+  // Import động để tránh circular; fetchSource gọi DB trực tiếp, không cần pass pool
+  const { fetchSource } = await import('../lib/newsFetch.js')
+  const result = await fetchSource(rows[0] as import('../lib/newsFetch.js').NewsSourceRow)
+  res.json(result)
 })

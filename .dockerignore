@@ -1,6 +1,8 @@
 # Dependencies
 node_modules
 server/node_modules
+# Đã bỏ tính năng tạo video tự động: không đưa cả thư mục vào build context
+auto-video-gen
 
 # Build outputs
 dist
@@ -14,6 +16,7 @@ server/dist
 # Environment (không đóng gói secret vào image; truyền qua env_file lúc chạy)
 .env
 .env.local
+.env.*.local
 .env.docker
 server/.env
 

@@ -1,6 +1,7 @@
 // Đánh giá hồ sơ nhà thầu theo hợp đồng (BM111-07.02, Phase B).
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import { api, openFileInNewTab } from '../../lib/api'
+import EmptyContractsHint from '../../components/hse/EmptyContractsHint'
 
 interface Contract {
   id: number; contract_no: string; title: string; contractor_name: string; status: string
@@ -66,7 +67,13 @@ export default function DossiersPage() {
               </button>
             </li>
           ))}
-          {filtered.length === 0 && <li className="py-6 text-center text-sm text-slate-400">Chưa có hợp đồng.</li>}
+          {/* Rỗng vì tìm kiếm không khớp là chuyện khác với rỗng vì không có hợp đồng nào
+              thuộc site mình — chỉ gợi ý lý do site khi danh sách gốc cũng rỗng. */}
+          {filtered.length === 0 && (
+            <li className="py-6 text-center text-sm text-slate-400">
+              {contracts.length === 0 ? <EmptyContractsHint /> : 'Không khớp từ khóa tìm kiếm.'}
+            </li>
+          )}
         </ul>
       </section>
 

@@ -3,6 +3,7 @@ dist
 server/dist
 .env
 .env.docker
+.env.deploy
 server/uploads
 *.log
 
@@ -16,8 +17,33 @@ upload-dev.mjs
 restore-db-dev.mjs
 fix-docker-perm.mjs
 check-server.mjs
+dev-exec.mjs
+push-proxy.mjs
+atld-create-admin.mjs
+atld-restore-script.js
+atld-backup-db.sh
 _rebuild.mjs
 _upload.mjs
 _ssh_diag_tmp.js
 _test.txt
-.claude/
+# .claude/ được track (skills, policies); chỉ bỏ cấu hình cục bộ (có thể chứa bí mật)
+.claude/settings.local.json
+.claude/settings.local.*
+
+# Env chứa API key TTS/AI của auto-video-gen
+auto-video-gen/.env.local
+auto-video-gen/.env.*.local
+
+# auto-video-gen là clone riêng của github.com/Cuongyd196/auto-video-gen (có .git riêng).
+# Commit vào đây chỉ tạo gitlink rỗng chứ không mang theo file; DEV nhận qua tarball
+# của deploy-dev.mjs (chỉ loại trừ node_modules/.git) nên không cần track.
+auto-video-gen/
+
+# File PDF sinh ra khi thử buildCommitmentPdf, không có mã nào tham chiếu
+_g.pdf
+
+# Script/kết quả thử nghiệm tạm trong server/
+server/_*.mjs
+server/_h5out/
+*.tsbuildinfo
+backups/

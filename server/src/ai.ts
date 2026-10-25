@@ -21,7 +21,9 @@ export interface GeneratedCourse {
   questions: GeneratedQuestion[]
 }
 
-const SYSTEM_PROMPT = `Bạn là chuyên gia biên soạn nội dung huấn luyện An toàn, Vệ sinh lao động (ATVSLĐ)
+/** System prompt động — số câu hỏi do admin cấu hình */
+const buildSystemPrompt = (questionCount: number) =>
+  `Bạn là chuyên gia biên soạn nội dung huấn luyện An toàn, Vệ sinh lao động (ATVSLĐ)
 và Bảo vệ môi trường cho nhà máy xi măng VICEM Hà Tiên, tuân thủ Luật ATVSLĐ 84/2015/QH13
 và Nghị định 44/2016/NĐ-CP của Việt Nam.
 
@@ -29,7 +31,7 @@ Nhiệm vụ: từ chủ đề người dùng cung cấp, soạn một khóa hu�
 Yêu cầu:
 - Nội dung chính xác, thực tế, phù hợp môi trường sản xuất xi măng.
 - summary: 4-7 ý cốt lõi, mỗi ý là một câu ngắn gọn, rõ ràng.
-- questions: 5-8 câu trắc nghiệm, mỗi câu có đúng 4 lựa chọn, chỉ 1 đáp án đúng.
+- questions: ĐÚNG ${questionCount} câu trắc nghiệm (không nhiều hơn, không ít hơn), mỗi câu có đúng 4 lựa chọn, chỉ 1 đáp án đúng.
 - grp: chọn 1 trong: "Nhóm 1", "Nhóm 2", "Nhóm 3", "Nhóm 4", "Nhóm 5", "Nhóm 6" cho phù hợp đối tượng.
 - duration: ước lượng thời lượng học, ví dụ "20 phút".
 
@@ -67,15 +69,30 @@ const TOOL = {
 }
 
 export function aiAvailable(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY)
+  return Boolean(process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY)
 }
 
-export async function generateCourse(topic: string): Promise<GeneratedCourse> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+/**
+ * Khởi tạo Anthropic client. Ưu tiên kết nối qua LLM Gateway:
+ *  - ANTHROPIC_AUTH_TOKEN → gửi header `Authorization: Bearer` (dùng cho gateway)
+ *  - ANTHROPIC_BASE_URL   → trỏ endpoint về gateway thay vì api.anthropic.com
+ * Fallback về ANTHROPIC_API_KEY (header `x-api-key`) khi gọi trực tiếp Anthropic.
+ */
+function makeClient(): Anthropic {
+  const baseURL = process.env.ANTHROPIC_BASE_URL || undefined
+  const authToken = process.env.ANTHROPIC_AUTH_TOKEN
+  if (authToken) {
+    return new Anthropic({ authToken, baseURL })
+  }
+  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL })
+}
+
+export async function generateCourse(topic: string, questionCount = 8): Promise<GeneratedCourse> {
+  const client = makeClient()
   const msg = await client.messages.create({
     model: MODEL,
     max_tokens: 4096,
-    system: SYSTEM_PROMPT,
+    system: buildSystemPrompt(Math.max(3, Math.min(20, questionCount))),
     tools: [TOOL],
     tool_choice: { type: 'tool', name: TOOL.name },
     messages: [{ role: 'user', content: `Chủ đề khóa huấn luyện: ${topic}` }],

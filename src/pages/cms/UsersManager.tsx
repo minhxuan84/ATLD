@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { api } from '../../lib/api'
 import { useAuth } from '../../context/AuthContext'
 import { CMS_SECTIONS, type CmsSection } from '../../types'
-import { UserPlus, Pencil, Trash2, X } from 'lucide-react'
+import { UserPlus, Pencil, Trash2, X, Search, ChevronLeft, ChevronRight } from 'lucide-react'
 
 interface UserRow {
   id: number
@@ -31,6 +31,9 @@ export default function UsersManager() {
   const [branches, setBranches] = useState<Branch[]>([])
   const [editing, setEditing] = useState<UserRow | null>(null)
   const [creating, setCreating] = useState(false)
+  const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const PAGE_SIZE = 20
   const [form, setForm] = useState<{ username: string; fullName: string; role: string; password: string; permissions: CmsSection[]; siteId: string }>({ username: '', fullName: '', role: 'trainee', password: '', permissions: [], siteId: '' })
   const [error, setError] = useState('')
 
@@ -89,6 +92,22 @@ export default function UsersManager() {
     }
   }
 
+  // Lọc theo tên đăng nhập / họ tên (không phân biệt hoa thường, bỏ dấu cách thừa)
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return users
+    return users.filter(
+      (u) => u.username.toLowerCase().includes(q) || (u.full_name ?? '').toLowerCase().includes(q),
+    )
+  }, [users, search])
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const safePage = Math.min(page, totalPages)
+  const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+
+  // Về trang 1 khi từ khóa thay đổi để không kẹt ở trang trống
+  useEffect(() => { setPage(1) }, [search])
+
   return (
     <div>
       <div className="flex items-center justify-between">
@@ -98,7 +117,21 @@ export default function UsersManager() {
         </button>
       </div>
 
-      <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+      {/* Thanh tìm kiếm */}
+      <div className="mt-4 flex items-center gap-3">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Tìm theo tên đăng nhập hoặc họ tên…"
+            className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm focus:border-vicem-500 focus:ring-2 focus:ring-vicem-100"
+          />
+        </div>
+        <span className="text-sm text-slate-400">{filtered.length} người dùng</span>
+      </div>
+
+      <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-slate-500">
             <tr>
@@ -111,12 +144,19 @@ export default function UsersManager() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {users.map((u) => (
+            {paged.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-4 py-10 text-center text-slate-400">
+                  {search ? 'Không tìm thấy người dùng phù hợp.' : 'Chưa có người dùng.'}
+                </td>
+              </tr>
+            )}
+            {paged.map((u) => (
               <tr key={u.id} className="hover:bg-slate-50">
                 <td className="px-4 py-3 font-medium text-slate-700">{u.username}{me?.id === u.id && <span className="ml-2 text-xs text-vicem-500">(bạn)</span>}</td>
                 <td className="px-4 py-3 text-slate-600">{u.full_name}</td>
                 <td className="px-4 py-3">
-                  <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${u.role === 'admin' ? 'bg-hatien-100 text-hatien-700' : u.role === 'officer' ? 'bg-vicem-100 text-vicem-700' : 'bg-slate-100 text-slate-600'}`}>
+                  <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${u.role === 'admin' ? 'bg-eco-100 text-eco-700' : u.role === 'officer' ? 'bg-vicem-100 text-vicem-700' : 'bg-slate-100 text-slate-600'}`}>
                     {ROLE_LABEL[u.role]}
                   </span>
                   {u.role === 'officer' && (
@@ -142,6 +182,31 @@ export default function UsersManager() {
           </tbody>
         </table>
       </div>
+
+      {/* Phân trang */}
+      {totalPages > 1 && (
+        <div className="mt-4 flex items-center justify-between text-sm">
+          <span className="text-slate-400">
+            Trang {safePage}/{totalPages}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={safePage <= 1}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-3 py-1.5 font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+            >
+              <ChevronLeft className="h-4 w-4" /> Trước
+            </button>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={safePage >= totalPages}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-3 py-1.5 font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+            >
+              Sau <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {(creating || editing) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={close}>

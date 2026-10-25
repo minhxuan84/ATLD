@@ -8,6 +8,7 @@ import type { CmsSection } from './types'
 const HomePage = lazy(() => import('./pages/HomePage'))
 const LoginPage = lazy(() => import('./pages/LoginPage'))
 const RegisterPage = lazy(() => import('./pages/RegisterPage'))
+const OAuthCallbackPage = lazy(() => import('./pages/OAuthCallbackPage'))
 const TrainingListPage = lazy(() => import('./pages/TrainingListPage'))
 const TrainingDetailPage = lazy(() => import('./pages/TrainingDetailPage'))
 const DocumentsPage = lazy(() => import('./pages/DocumentsPage'))
@@ -25,6 +26,12 @@ const NewsManager = lazy(() => import('./pages/cms/NewsManager'))
 const BranchesManager = lazy(() => import('./pages/cms/BranchesManager'))
 const QuizFieldsManager = lazy(() => import('./pages/cms/QuizFieldsManager'))
 const MenuManager = lazy(() => import('./pages/cms/MenuManager'))
+const LdapConfigPage = lazy(() => import('./pages/cms/LdapConfigPage'))
+const SmartCAConfigPage = lazy(() => import('./pages/cms/SmartCAConfigPage'))
+const WorkerDeclarePage = lazy(() => import('./pages/portal/WorkerDeclarePage'))
+const FieldReportPage = lazy(() => import('./pages/portal/FieldReportPage'))
+const CapaResponsePage = lazy(() => import('./pages/portal/CapaResponsePage'))
+const QuizPage = lazy(() => import('./pages/portal/QuizPage'))
 
 function Protected({ children, role }: { children: ReactNode; role?: 'admin' }) {
   const { user, loading } = useAuth()
@@ -52,6 +59,13 @@ function SectionGuard({ section, children }: { section: CmsSection; children: Re
   return <>{children}</>
 }
 
+// Trang cấu hình hệ thống (LDAP, SmartCA) chỉ dành cho admin — server cũng chặn bằng requireRole('admin').
+function AdminGuard({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  if (user?.role !== 'admin') return <Navigate to="/cms" replace />
+  return <>{children}</>
+}
+
 function PublicShell() {
   return (
     <div className="flex min-h-screen flex-col">
@@ -60,6 +74,7 @@ function PublicShell() {
         <Routes>
           <Route path="/dang-nhap" element={<LoginPage />} />
           <Route path="/dang-ky" element={<RegisterPage />} />
+          <Route path="/oauth/callback" element={<OAuthCallbackPage />} />
           <Route path="/tin-tuc" element={<NewsPage />} />
           <Route path="/tin-tuc/:id" element={<NewsDetailPage />} />
           <Route path="/huan-luyen" element={<Protected><TrainingListPage /></Protected>} />
@@ -93,7 +108,17 @@ export default function App() {
         <Route path="muc-tieu" element={<SectionGuard section="muc-tieu"><GoalsManager /></SectionGuard>} />
         <Route path="menu" element={<SectionGuard section="menu"><MenuManager /></SectionGuard>} />
         <Route path="trang-tinh" element={<SectionGuard section="trang-tinh"><SiteSettings /></SectionGuard>} />
+        <Route path="ldap" element={<AdminGuard><LdapConfigPage /></AdminGuard>} />
+        <Route path="smartca" element={<AdminGuard><SmartCAConfigPage /></AdminGuard>} />
       </Route>
+
+      {/* Cổng khai báo cho nhà thầu — mở bằng link có token, KHÔNG cần đăng nhập.
+          Đặt ngoài PublicShell: người mở là nhà thầu không có tài khoản, Header với
+          các liên kết nội bộ và nút đăng nhập chỉ gây nhiễu. */}
+      <Route path="/khai-bao/:token" element={<WorkerDeclarePage />} />
+      <Route path="/bao-an-toan/:token" element={<FieldReportPage />} />
+      <Route path="/khac-phuc/:token" element={<CapaResponsePage />} />
+      <Route path="/thi/:token" element={<QuizPage />} />
 
       {/* Toàn bộ trang công khai */}
       <Route path="/*" element={<PublicShell />} />

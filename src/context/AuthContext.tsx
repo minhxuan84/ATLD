@@ -21,7 +21,14 @@ export function seesAllSites(user: AuthUser | null): boolean {
 // Tiện ích: user có quyền vào một mục CMS không (admin luôn có).
 export function canAccess(user: AuthUser | null, section: CmsSection): boolean {
   if (!user) return false
-  return user.role === 'admin' || user.permissions?.includes(section)
+  if (user.role === 'admin') return true
+  const p = user.permissions ?? []
+  if (p.includes(section)) return true
+  // Quyền con mở được cửa vào mục cha: cán bộ chỉ có 'an-toan:gate' (bảo vệ) vẫn phải
+  // vào được module ATVSLĐ, nếu không thì cấp quyền xong mà đăng nhập vào không thấy gì
+  // — cửa vào đòi đúng chuỗi 'an-toan' trong khi trang con lại xét bằng canHse().
+  // Đây chỉ là quyền ĐI VÀO; thao tác bên trong vẫn do canHse() và requireHse() gác.
+  return p.some((k) => k.startsWith(`${section}:`))
 }
 // Kiểm tra sub-permission HSE. Admin và 'an-toan' toàn quyền luôn pass.
 export function canHse(user: AuthUser | null, ...subKeys: ('gate' | 'inspect' | 'approve')[]): boolean {
@@ -39,7 +46,10 @@ interface AuthState {
   user: AuthUser | null
   loading: boolean
   login: (username: string, password: string, remember?: boolean) => Promise<void>
+  ldapLogin: (username: string, password: string, remember?: boolean) => Promise<void>
   logout: () => void
+  /** Dùng cho OAuth callback: set user sau khi token đã được lưu từ bên ngoài */
+  setUserFromToken: (user: AuthUser) => void
 }
 
 const AuthContext = createContext<AuthState | null>(null)
@@ -64,7 +74,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (username: string, password: string, remember = true) => {
     const d = await api<{ token: string; user: AuthUser }>('/auth/login', {
       method: 'POST',
-      body: { username, password },
+      body: { username, password, remember },
+    })
+    setToken(d.token, remember)
+    setUser(d.user)
+  }
+
+  const ldapLogin = async (username: string, password: string, remember = true) => {
+    const d = await api<{ token: string; user: AuthUser }>('/auth/ldap-login', {
+      method: 'POST',
+      body: { username, password, remember },
     })
     setToken(d.token, remember)
     setUser(d.user)
@@ -75,7 +94,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }
 
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>
+  const setUserFromToken = (u: AuthUser) => setUser(u)
+
+  return <AuthContext.Provider value={{ user, loading, login, ldapLogin, logout, setUserFromToken }}>{children}</AuthContext.Provider>
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

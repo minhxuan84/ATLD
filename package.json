@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@tinymce/tinymce-react": "^5.1.1",
+    "face-api.js": "^0.22.2",
     "html2canvas": "^1.4.1",
     "html5-qrcode": "^2.3.8",
     "jspdf": "^4.2.1",

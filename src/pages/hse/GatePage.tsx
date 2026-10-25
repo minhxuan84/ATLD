@@ -4,6 +4,11 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode'
 import { api } from '../../lib/api'
 import { fmtDate } from '../../lib/date'
+import { loadModels, detectFaceWithBox, matchFace } from '../../lib/faceRecognition'
+import type { FaceCandidate } from '../../lib/faceRecognition'
+
+/** FaceCandidate mở rộng: khách/NCC có thêm qr_code để gọi lookupVisitor trực tiếp */
+type GateFaceCandidate = FaceCandidate & { qr_code?: string }
 
 // Backend /hse/gate/lookup trả về { results: [...] } với shape này:
 interface GateWorker {
@@ -12,9 +17,14 @@ interface GateWorker {
   id_number: string | null
   access_status: string
   contractor_name: string
+  /**
+   * Pha E: đây là quyết định CUỐI của cổng, không chỉ là "đủ hồ sơ". False cả khi
+   * chưa được phê duyệt cấp quyền, hết hiệu lực, bị đình chỉ hoặc đã thu hồi quyền.
+   */
   eligible: boolean
   reasons: string[]
   suspended: boolean
+  revoked: boolean
   presence: string          // 'in' = đang trong công trường, 'out' = đã ra/chưa vào
   last_in_at: string | null
   last_out_at: string | null
@@ -97,6 +107,18 @@ export default function GatePage({ embedded = false }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scannerRef = useRef<Html5Qrcode | null>(null)
+
+  // ── Chế độ nhận diện khuôn mặt ──────────────────────────────────
+  const [faceMode, setFaceMode] = useState(false)
+  const [faceStatus, setFaceStatus] = useState<'loading' | 'scanning'>('loading')
+  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment')
+  // Số khuôn mặt đã đăng ký và số lần quét không khớp — để báo cho bảo vệ biết
+  // đang xảy ra chuyện gì, thay vì để màn hình quay vô hạn không phản hồi.
+  const [faceCandidateCount, setFaceCandidateCount] = useState(0)
+  const [faceNoMatch, setFaceNoMatch] = useState(0)
+  const faceVideoRef = useRef<HTMLVideoElement>(null)
+  const faceStreamRef = useRef<MediaStream | null>(null)
+  const faceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadHistory = useCallback(async () => {
     try {
@@ -246,7 +268,90 @@ export default function GatePage({ embedded = false }: Props) {
     return () => { cancelled = true; void stopScanner() }
   }, [scanOpen, onScan, stopScanner])
 
-  const allowed = !!selected && selected.eligible && selected.access_status !== 'suspended'
+  // ── Vòng đời chế độ nhận diện khuôn mặt ────────────────────────
+  useEffect(() => {
+    if (!faceMode) {
+      faceIntervalRef.current && clearInterval(faceIntervalRef.current)
+      faceIntervalRef.current = null
+      faceStreamRef.current?.getTracks().forEach((t) => t.stop())
+      faceStreamRef.current = null
+      return
+    }
+    let cancelled = false
+    setFaceStatus('loading')
+    ;(async () => {
+      try {
+        const [descData] = await Promise.all([
+          api<{
+            workers: GateFaceCandidate[]
+            visitors: GateFaceCandidate[]
+          }>('/hse/gate/descriptors'),
+          loadModels(),
+        ])
+        if (cancelled) return
+        const candidates: GateFaceCandidate[] = [...descData.workers, ...descData.visitors]
+        setFaceCandidateCount(candidates.length)
+        setFaceNoMatch(0)
+        // Chưa ai đăng ký khuôn mặt thì có quét cũng không khớp được — nói luôn
+        // thay vì mở camera rồi quay mãi.
+        if (!candidates.length) {
+          setFaceMode(false)
+          setErr('Chưa có khuôn mặt nào được đăng ký. Vào mục Người lao động / Khách để đăng ký ảnh mặt trước khi dùng nhận diện.')
+          return
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+        })
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return }
+        faceStreamRef.current = stream
+        if (faceVideoRef.current) faceVideoRef.current.srcObject = stream
+        setFaceStatus('scanning')
+
+        // Nhận diện mỗi 800 ms — dừng ngay sau khi khớp thành công
+        faceIntervalRef.current = setInterval(async () => {
+          if (!faceVideoRef.current || cancelled) return
+          const detection = await detectFaceWithBox(faceVideoRef.current).catch(() => null)
+          if (!detection || cancelled) return
+          const match = matchFace(detection.descriptor, candidates)
+          // Thấy mặt nhưng không khớp ai: đếm để hiện gợi ý tra tay, không tự tắt
+          // camera vì người đứng chưa ngay ngắn cũng rơi vào nhánh này.
+          if (!match) { setFaceNoMatch((n) => n + 1); return }
+
+          clearInterval(faceIntervalRef.current!)
+          faceIntervalRef.current = null
+          if (!cancelled) {
+            setFaceMode(false)
+            if (match.type === 'worker') {
+              setQ(match.name)
+              await search(match.name)
+            } else {
+              const vc = candidates.find((c) => c.id === match.id && c.type === 'visitor')
+              if (vc?.qr_code) await lookupVisitor(vc.qr_code)
+            }
+          }
+        }, 800)
+      } catch (e) {
+        if (!cancelled) {
+          setFaceMode(false)
+          setErr(e instanceof Error ? e.message : 'Không khởi động được nhận diện khuôn mặt.')
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      faceIntervalRef.current && clearInterval(faceIntervalRef.current)
+      faceIntervalRef.current = null
+      faceStreamRef.current?.getTracks().forEach((t) => t.stop())
+      faceStreamRef.current = null
+    }
+  }, [faceMode, facingMode, search, lookupVisitor])
+
+  // eligible đã gồm cả đình chỉ/thu hồi/phê duyệt/hiệu lực (xem evalWorkerAccess ở
+  // server). Không && thêm access_status nữa — lặp điều kiện ở hai nơi là cách Pha A
+  // đã sinh ra lỗi lần trước.
+  const allowed = !!selected && selected.eligible
 
   const wrap = (children: React.ReactNode) =>
     embedded
@@ -286,7 +391,60 @@ export default function GatePage({ embedded = false }: Props) {
         >
           📷 QR
         </button>
+        <button
+          onClick={() => setFaceMode(true)}
+          disabled={faceMode}
+          className="shrink-0 rounded-xl bg-indigo-600 px-4 py-3 text-base font-bold text-white shadow disabled:opacity-50 active:bg-indigo-700"
+          title="Nhận diện khuôn mặt"
+        >
+          🤳
+        </button>
       </div>
+
+      {/* Panel nhận diện khuôn mặt — hiện khi faceMode = true */}
+      {faceMode && (
+        <div className="relative overflow-hidden rounded-2xl bg-slate-900 shadow-xl">
+          <video
+            ref={faceVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full"
+          />
+          {/* Hình elip định vị khuôn mặt */}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="h-48 w-36 rounded-full border-2 border-dashed border-white/50" />
+          </div>
+          {faceStatus === 'loading' && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-900/80 text-white">
+              <span className="animate-spin text-3xl">⚙</span>
+              <span className="text-sm">Đang tải model nhận diện…</span>
+            </div>
+          )}
+          {faceStatus === 'scanning' && (
+            <div className="absolute bottom-3 left-0 right-0 flex flex-col items-center gap-1.5 px-3">
+              <span className="rounded-full bg-black/60 px-3 py-1 text-xs text-white">
+                Đang nhận diện khuôn mặt… ({faceCandidateCount} người đã đăng ký)
+              </span>
+              {/* Quét quá ~8 giây (10 nhịp × 800 ms) mà không khớp: gợi ý tra tay
+                  để bảo vệ không mắc kẹt chờ camera. */}
+              {faceNoMatch >= 10 && (
+                <span className="rounded-lg bg-amber-500/90 px-3 py-1.5 text-center text-xs font-medium text-white">
+                  Chưa khớp được ai. Nhìn thẳng, đủ sáng, bỏ khẩu trang — hoặc nhập tên/CCCD để tra tay.
+                </span>
+              )}
+            </div>
+          )}
+          <button
+            onClick={() => setFacingMode((f) => f === 'environment' ? 'user' : 'environment')}
+            className="absolute left-2 top-2 rounded-lg bg-black/50 px-2.5 py-1 text-sm font-bold text-white hover:bg-black/70"
+          >🔄</button>
+          <button
+            onClick={() => setFaceMode(false)}
+            className="absolute right-2 top-2 rounded-lg bg-black/50 px-2.5 py-1 text-sm font-bold text-white hover:bg-black/70"
+          >✕</button>
+        </div>
+      )}
 
       {/* Lỗi chung */}
       {err && (
@@ -300,7 +458,7 @@ export default function GatePage({ embedded = false }: Props) {
       {results.length > 0 && !selected && (
         <ul className="rounded-xl border border-slate-200 bg-white shadow-sm divide-y divide-slate-100">
           {results.map((w) => {
-            const ok = w.eligible && w.access_status !== 'suspended'
+            const ok = w.eligible
             return (
               <li key={w.id}>
                 <button
@@ -339,6 +497,9 @@ export default function GatePage({ embedded = false }: Props) {
             {selected.access_status === 'suspended' && (
               <p className="mt-1 text-sm font-semibold text-orange-600">⚠ Đang bị đình chỉ</p>
             )}
+            {selected.access_status === 'revoked' && (
+              <p className="mt-1 text-sm font-semibold text-slate-700">⛔ Đã thu hồi quyền vào nhà máy</p>
+            )}
           </div>
 
           <div className="mb-4 rounded-xl bg-white/70 px-4 py-3">
@@ -359,7 +520,9 @@ export default function GatePage({ embedded = false }: Props) {
 
           {!allowed && Array.isArray(selected.reasons) && selected.reasons.length > 0 && (
             <div className="mb-4 rounded-xl bg-rose-100 px-4 py-3">
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">Hồ sơ còn thiếu:</p>
+              {/* Không còn chỉ là "hồ sơ còn thiếu": reasons giờ gồm cả chưa phê duyệt,
+                  hết hiệu lực, đình chỉ và thu hồi quyền. */}
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">Lý do không được vào:</p>
               <ul className="space-y-1">
                 {selected.reasons.map((m, i) => (
                   <li key={i} className="flex items-start gap-1.5 text-sm text-rose-700">

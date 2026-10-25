@@ -80,6 +80,21 @@ export async function downloadFile(path: string, fallbackName: string) {
   URL.revokeObjectURL(url)
 }
 
+// Nạp file (kèm JWT) thành Blob URL để gắn vào <img src>. Thẻ <img> không gửi được
+// header Authorization, nên ảnh từ endpoint có requireAuth buộc phải đi qua fetch.
+// Người gọi tự thu hồi URL bằng URL.revokeObjectURL khi không dùng nữa.
+export async function fetchBlobUrl(path: string): Promise<string> {
+  const token = getToken()
+  const res = await fetch(`/api${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => null)
+    throw new Error((data as { error?: string })?.error ?? 'Không tải được ảnh.')
+  }
+  return URL.createObjectURL(await res.blob())
+}
+
 // Mở file bất kỳ (kèm JWT) trong tab mới bằng Blob URL — không lộ token qua query param.
 // LƯU Ý mobile: phải mở tab NGAY trong cử chỉ chạm (đồng bộ), trước await fetch —
 // nếu window.open() chạy sau await, Safari/Chrome mobile sẽ chặn như popup.

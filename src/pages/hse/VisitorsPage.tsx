@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
 import { useConfig } from '../../context/ConfigContext'
 import { fmtDate } from '../../lib/date'
+import FaceEnrollModal from '../../components/hse/FaceEnrollModal'
 
 interface Visitor {
   id: number; kind: string; full_name: string; id_number: string | null
@@ -33,6 +34,7 @@ export default function VisitorsPage() {
   const [scanDir, setScanDir] = useState<'in' | 'out'>('in')
   const [scanResult, setScanResult] = useState<null | { result: string; reason?: string; visitor?: { full_name: string; kind: string } }>(null)
   const [qrView, setQrView] = useState<null | { visitor: Visitor; dataUrl: string }>(null)
+  const [faceTarget, setFaceTarget] = useState<{ id: number; name: string } | null>(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -155,7 +157,9 @@ export default function VisitorsPage() {
                     {v.access_status === 'allowed' ? 'Cho phép' : 'Chặn'}</span></td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
                   <button onClick={() => showQr(v)} className="rounded px-2 py-0.5 text-indigo-600 hover:bg-slate-100">QR</button>
-                  <button onClick={() => openEdit(v)} className="rounded px-2 py-0.5 text-vicem-500 hover:bg-slate-100">Sửa</button></td>
+                  <button onClick={() => openEdit(v)} className="rounded px-2 py-0.5 text-vicem-500 hover:bg-slate-100">Sửa</button>
+                  <button onClick={() => setFaceTarget({ id: v.id, name: v.full_name })}
+                    className="rounded px-2 py-0.5 text-slate-500 hover:bg-slate-100" title="Đăng ký khuôn mặt">📷</button></td>
               </tr>
             ))}
             {items.length === 0 && <tr><td colSpan={8} className="py-6 text-center text-slate-400">Chưa có khách nào.</td></tr>}
@@ -232,6 +236,16 @@ export default function VisitorsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {faceTarget && (
+        <FaceEnrollModal
+          id={faceTarget.id}
+          type="visitor"
+          name={faceTarget.name}
+          onClose={() => setFaceTarget(null)}
+          onSuccess={() => { setFaceTarget(null); void load() }}
+        />
       )}
 
       {qrView && (

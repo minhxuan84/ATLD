@@ -1,3 +1,5 @@
+> ⚠️ **Đã lỗi thời** — nguồn cập nhật: [`docs/DEPLOY-OPS.md`](docs/DEPLOY-OPS.md). Giữ file này chỉ để tham khảo lịch sử.
+
 # Hướng dẫn triển khai ATLĐ VICEM Hà Tiên với Docker
 
 ## Yêu cầu
