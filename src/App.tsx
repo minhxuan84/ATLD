@@ -20,6 +20,7 @@ const CmsLayout = lazy(() => import('./pages/cms/CmsLayout'))
 const Dashboard = lazy(() => import('./pages/cms/Dashboard'))
 const UsersManager = lazy(() => import('./pages/cms/UsersManager'))
 const CoursesManager = lazy(() => import('./pages/cms/CoursesManager'))
+const CertificatesPage = lazy(() => import('./pages/cms/CertificatesPage'))
 const GoalsManager = lazy(() => import('./pages/cms/GoalsManager'))
 const SiteSettings = lazy(() => import('./pages/cms/SiteSettings'))
 const NewsManager = lazy(() => import('./pages/cms/NewsManager'))
@@ -101,6 +102,7 @@ export default function App() {
         <Route path="nguoi-dung" element={<SectionGuard section="nguoi-dung"><UsersManager /></SectionGuard>} />
         <Route path="chi-nhanh" element={<SectionGuard section="chi-nhanh"><BranchesManager /></SectionGuard>} />
         <Route path="khoa-hoc" element={<SectionGuard section="khoa-hoc"><CoursesManager /></SectionGuard>} />
+        <Route path="chung-chi" element={<SectionGuard section="khoa-hoc"><CertificatesPage /></SectionGuard>} />
         <Route path="truong-trac-nghiem" element={<SectionGuard section="truong-trac-nghiem"><QuizFieldsManager /></SectionGuard>} />
         <Route path="tin-tuc" element={<SectionGuard section="tin-tuc"><NewsManager /></SectionGuard>} />
         <Route path="tai-lieu" element={<SectionGuard section="tai-lieu"><DocumentsPage /></SectionGuard>} />

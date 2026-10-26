@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from '../../lib/api'
 import { Plus, Trash2, ChevronDown, ChevronRight, Check, Pencil, X, Award, Sparkles, Loader2, QrCode, Link2, DownloadCloud } from 'lucide-react'
 import { fmtDate } from '../../lib/date'
+import { useAuth, seesAllSites } from '../../context/AuthContext'
 
 interface CourseRow {
   id: string
@@ -85,6 +86,9 @@ export default function CoursesManager() {
     courseId: string; id: number; token: string; expiresInDays: number; qrUrl: string
   } | null>(null)
   const [showNew, setShowNew] = useState(false)
+  const { user } = useAuth()
+  // Cán bộ gán site: khóa học luôn thuộc site của mình (server ép), không cho chọn chi nhánh khác.
+  const lockBranch = !seesAllSites(user)
   const [error, setError] = useState('')
 
   const [newCourse, setNewCourse] = useState({ id: '', title: '', description: '', grp: 'Nhóm 4', branch_id: '', video_url: '', duration: '', pass_score: 80, validity_months: '', max_attempts: '', summary: '' })
@@ -106,7 +110,7 @@ export default function CoursesManager() {
   const [qDraft, setQDraft] = useState<QuestionDraft>(emptyQuestion())
 
   const fetchCourses = useCallback(() => {
-    api<{ courses: CourseRow[] }>('/courses').then((d) => setCourses(d.courses)).catch(() => {})
+    api<{ courses: CourseRow[] }>('/admin/courses').then((d) => setCourses(d.courses)).catch(() => {})
     api<{ branches: Branch[] }>('/admin/branches').then((d) => setBranches(d.branches)).catch(() => {})
   }, [])
   useEffect(fetchCourses, [fetchCourses])
@@ -333,7 +337,7 @@ export default function CoursesManager() {
           <input value={newCourse.id} onChange={(e) => setNewCourse({ ...newCourse, id: e.target.value })} placeholder="Mã (vd: atld-nang-cao)" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
           <input value={newCourse.title} onChange={(e) => setNewCourse({ ...newCourse, title: e.target.value })} placeholder="Tên khóa học" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
           <input value={newCourse.grp} onChange={(e) => setNewCourse({ ...newCourse, grp: e.target.value })} placeholder="Nhóm đối tượng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-          <select value={newCourse.branch_id} onChange={(e) => setNewCourse({ ...newCourse, branch_id: e.target.value })} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
+          <select value={lockBranch ? String(user?.siteId ?? '') : newCourse.branch_id} disabled={lockBranch} onChange={(e) => setNewCourse({ ...newCourse, branch_id: e.target.value })} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100">
             <option value="">— Chọn chi nhánh —</option>
             {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
@@ -389,7 +393,7 @@ export default function CoursesManager() {
                 <div className="grid gap-3 sm:grid-cols-2">
                   <input value={courseDraft.title} onChange={(e) => setCourseDraft({ ...courseDraft, title: e.target.value })} placeholder="Tên khóa học" className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2" />
                   <input value={courseDraft.grp} onChange={(e) => setCourseDraft({ ...courseDraft, grp: e.target.value })} placeholder="Nhóm đối tượng" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-                  <select value={courseDraft.branch_id} onChange={(e) => setCourseDraft({ ...courseDraft, branch_id: e.target.value })} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                  <select value={courseDraft.branch_id} disabled={lockBranch} onChange={(e) => setCourseDraft({ ...courseDraft, branch_id: e.target.value })} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100">
                     <option value="">— Chọn chi nhánh —</option>
                     {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
                   </select>

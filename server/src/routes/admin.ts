@@ -2,7 +2,8 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import crypto from 'node:crypto'
 import { query } from '../db.js'
-import { requireAuth, requireSection, requireCms, CMS_SECTIONS, requireRole } from '../auth.js'
+import { requireAuth, requireSection, requireCms, CMS_SECTIONS, requireRole, siteScope, invalidateUserCache } from '../auth.js'
+import type { Request, Response, NextFunction } from 'express'
 import { escapeText } from '../util.js'
 import { audit, clientIp } from '../lib/hse-core.js'
 import { hashToken } from './portal.js'
@@ -16,21 +17,21 @@ export const adminRouter = Router()
 adminRouter.use(requireAuth)
 
 // ---- Dashboard: thống kê tổng quan ----
-adminRouter.get('/stats', requireCms, async (_req, res) => {
+adminRouter.get('/stats', requireCms, async (req, res) => {
+  // Cán bộ gán site chỉ thấy số liệu người dùng / khóa học / chứng chỉ của site mình.
+  // Tài liệu và tin tức là nội dung dùng chung toàn công ty → không lọc.
+  const { all, siteId } = siteScope(req.user!)
+  const sc = [all, siteId]
   const [users, courses, docs, news, certs, roleBreakdown, recentCerts] = await Promise.all([
-    query('SELECT count(*)::int AS n FROM users'),
-    query('SELECT count(*)::int AS n FROM courses'),
+    query('SELECT count(*)::int AS n FROM users WHERE ($1::boolean OR site_id = $2)', sc),
+    query('SELECT count(*)::int AS n FROM courses WHERE ($1::boolean OR branch_id = $2)', sc),
     query('SELECT count(*)::int AS n FROM documents'),
     query('SELECT count(*)::int AS n FROM news'),
-    query('SELECT count(*)::int AS n FROM progress WHERE passed = true'),
-    query(`SELECT role, count(*)::int AS n FROM users GROUP BY role`),
-    query(`SELECT p.cert_id, u.full_name, c.title, p.quiz_score, p.trainee_info,
-                   to_char(p.completed_at,'YYYY-MM-DD') AS date
-            FROM progress p
-            JOIN users u ON u.id = p.user_id
-            JOIN courses c ON c.id = p.course_id
-            WHERE p.passed = true
-            ORDER BY p.completed_at DESC NULLS LAST LIMIT 8`),
+    query(`SELECT count(*)::int AS n FROM (${CERT_LIST_SQL}) x`, sc),
+    query(`SELECT role, count(*)::int AS n FROM users WHERE ($1::boolean OR site_id = $2) GROUP BY role`, sc),
+    query(`SELECT cert_id, full_name, title, score AS quiz_score, issued_at AS date
+           FROM (${CERT_LIST_SQL}) x
+           ORDER BY issued_at DESC NULLS LAST LIMIT 8`, sc),
   ])
   res.json({
     totals: {
@@ -45,6 +46,46 @@ adminRouter.get('/stats', requireCms, async (_req, res) => {
   })
 })
 
+// Danh sách chứng chỉ đã cấp, gộp hai nguồn:
+//  - quiz_certificates (thi qua tài khoản hoặc QR, có PDF bài làm + chứng nhận),
+//  - progress đạt nhưng chưa có bản ghi quiz_certificates (dữ liệu cũ, không có PDF).
+// Lọc site: khóa học thuộc site, HOẶC học viên (tài khoản) thuộc site. $1=all, $2=siteId.
+const CERT_LIST_SQL = `
+  SELECT c.cert_id, c.course_id, co.title, co.branch_id, b.name AS branch_name,
+         COALESCE(u.full_name, c.trainee_name) AS full_name, u.username,
+         c.score, c.issued_at, c.expires_at, c.source,
+         c.attempt_id, (c.cert_pdf IS NOT NULL) AS has_cert_pdf,
+         (a.detail_pdf IS NOT NULL) AS has_attempt_pdf
+  FROM atld.quiz_certificates c
+  JOIN atld.courses co ON co.id = c.course_id
+  LEFT JOIN atld.branches b ON b.id = co.branch_id
+  LEFT JOIN atld.users u ON u.id = c.user_id
+  LEFT JOIN atld.quiz_attempts a ON a.id = c.attempt_id
+  WHERE c.passed IS NOT FALSE
+    AND ($1::boolean OR co.branch_id = $2 OR u.site_id = $2)
+  UNION ALL
+  SELECT p.cert_id, p.course_id, co.title, co.branch_id, b.name AS branch_name,
+         u.full_name, u.username,
+         p.quiz_score AS score, p.completed_at AS issued_at, p.expires_at::timestamptz, 'account' AS source,
+         NULL::int AS attempt_id, false AS has_cert_pdf, false AS has_attempt_pdf
+  FROM atld.progress p
+  JOIN atld.courses co ON co.id = p.course_id
+  LEFT JOIN atld.branches b ON b.id = co.branch_id
+  JOIN atld.users u ON u.id = p.user_id
+  WHERE p.passed = true
+    AND NOT EXISTS (SELECT 1 FROM atld.quiz_certificates q
+                    WHERE q.user_id = p.user_id AND q.course_id = p.course_id)
+    AND ($1::boolean OR co.branch_id = $2 OR u.site_id = $2)`
+
+adminRouter.get('/certificates', requireSection('khoa-hoc'), async (req, res) => {
+  const { all, siteId } = siteScope(req.user!)
+  const { rows } = await query(
+    `SELECT * FROM (${CERT_LIST_SQL}) x ORDER BY issued_at DESC NULLS LAST LIMIT 2000`,
+    [all, siteId],
+  )
+  res.json({ certificates: rows })
+})
+
 // ---- Người dùng ----
 // Lọc danh sách quyền hợp lệ (bỏ khóa lạ), tránh ghi quyền không tồn tại.
 function cleanPermissions(input: unknown): string[] {
@@ -52,11 +93,46 @@ function cleanPermissions(input: unknown): string[] {
   return [...new Set(input.map((x) => String(x)))].filter((x) => (CMS_SECTIONS as readonly string[]).includes(x))
 }
 
-adminRouter.get('/users', requireSection('nguoi-dung'), async (_req, res) => {
+/** User đích có thuộc phạm vi site của người đang thao tác không (admin / chưa gán site: luôn có). */
+async function userInScope(req: Request, id: number): Promise<boolean> {
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query('SELECT 1 FROM users WHERE id = $1 AND ($2::boolean OR site_id = $3)', [id, all, siteId])
+  return r.rows.length > 0
+}
+
+/** Middleware: khóa học ở `req.params[param]` phải thuộc site của user, nếu không → 404. */
+function courseScoped(param = 'id') {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const { all, siteId } = siteScope(req.user!)
+    const r = await query('SELECT 1 FROM courses WHERE id = $1 AND ($2::boolean OR branch_id = $3)',
+      [String(req.params[param]), all, siteId])
+    if (r.rows.length) return next()
+    res.status(404).json({ error: 'Không tìm thấy khóa học.' })
+  }
+}
+
+/** Middleware: câu hỏi `req.params.id` phải thuộc khóa học trong site của user. */
+async function questionScoped(req: Request, res: Response, next: NextFunction) {
+  const { all, siteId } = siteScope(req.user!)
+  const r = await query(
+    `SELECT 1 FROM questions q JOIN courses c ON c.id = q.course_id
+     WHERE q.id = $1 AND ($2::boolean OR c.branch_id = $3)`,
+    [Number(req.params.id), all, siteId],
+  )
+  if (r.rows.length) return next()
+  res.status(404).json({ error: 'Không tìm thấy câu hỏi.' })
+}
+
+adminRouter.get('/users', requireSection('nguoi-dung'), async (req, res) => {
+  // Cán bộ gán site chỉ thấy người dùng thuộc site mình.
+  const { all, siteId } = siteScope(req.user!)
   const { rows } = await query(
     `SELECT u.id, u.username, u.full_name, u.role, u.permissions, u.site_id, b.name AS site_name,
             to_char(u.created_at,'YYYY-MM-DD') AS created_at
-     FROM users u LEFT JOIN branches b ON b.id = u.site_id ORDER BY u.id`,
+     FROM users u LEFT JOIN branches b ON b.id = u.site_id
+     WHERE ($1::boolean OR u.site_id = $2)
+     ORDER BY u.id`,
+    [all, siteId],
   )
   res.json({ users: rows })
 })
@@ -70,8 +146,12 @@ adminRouter.post('/users', requireSection('nguoi-dung'), async (req, res) => {
   const isAdmin = req.user!.role === 'admin'
   const role = isAdmin ? String(req.body?.role ?? 'trainee') : 'trainee'
   const permissions = isAdmin ? cleanPermissions(req.body?.permissions) : []
-  // Site chỉ do admin gán (chỉ ý nghĩa với officer). null = không giới hạn/không có site.
-  const siteId = isAdmin && req.body?.site_id ? Number(req.body.site_id) : null
+  // Site do admin gán. Cán bộ gán site tạo học viên thì học viên thuộc luôn site của cán bộ
+  // (nếu không, học viên vừa tạo sẽ biến mất khỏi danh sách của chính người tạo).
+  const scope = siteScope(req.user!)
+  const siteId = isAdmin
+    ? (req.body?.site_id ? Number(req.body.site_id) : null)
+    : (scope.all ? null : scope.siteId)
   if (!/^[a-z0-9_.]{3,60}$/.test(username)) return res.status(400).json({ error: 'Tên đăng nhập không hợp lệ (3-60 ký tự, chữ thường/số/_).' })
   if (!fullName) return res.status(400).json({ error: 'Thiếu họ tên.' })
   if (password.length < 6) return res.status(400).json({ error: 'Mật khẩu tối thiểu 6 ký tự.' })
@@ -95,6 +175,7 @@ adminRouter.put('/users/:id', requireSection('nguoi-dung'), async (req, res) => 
   const isAdmin = req.user!.role === 'admin'
 
   if (!fullName) return res.status(400).json({ error: 'Thiếu họ tên.' })
+  if (!(await userInScope(req, id))) return res.status(404).json({ error: 'Không tìm thấy người dùng.' })
 
   // Vai trò & quyền chỉ do admin thật quản lý. Cán bộ được ủy quyền chỉ đổi được họ tên / mật khẩu.
   if (isAdmin) {
@@ -123,13 +204,16 @@ adminRouter.put('/users/:id', requireSection('nguoi-dung'), async (req, res) => 
       await query('UPDATE users SET full_name=$1 WHERE id=$2', [fullName, id])
     }
   }
+  invalidateUserCache(id)
   res.json({ ok: true })
 })
 
 adminRouter.delete('/users/:id', requireSection('nguoi-dung'), async (req, res) => {
   const id = Number(req.params.id)
   if (req.user!.id === id) return res.status(400).json({ error: 'Không thể tự xóa tài khoản đang đăng nhập.' })
+  if (!(await userInScope(req, id))) return res.status(404).json({ error: 'Không tìm thấy người dùng.' })
   await query('DELETE FROM users WHERE id = $1', [id])
+  invalidateUserCache(id)
   res.json({ ok: true })
 })
 
@@ -153,6 +237,23 @@ adminRouter.post('/courses/ai-generate', requireSection('khoa-hoc'), async (req,
   }
 })
 
+// Danh sách khóa học cho CMS — lọc theo site (khác GET /api/courses dành cho học viên).
+adminRouter.get('/courses', requireSection('khoa-hoc'), async (req, res) => {
+  const { all, siteId } = siteScope(req.user!)
+  const { rows } = await query(
+    `SELECT c.id, c.title, c.description, c.grp, c.branch_id, b.name AS branch_name,
+            c.video_url, c.duration, c.summary, c.pass_score, c.validity_months,
+            c.max_attempts,
+            (SELECT count(*)::int FROM questions q WHERE q.course_id = c.id) AS question_count
+     FROM courses c
+     LEFT JOIN branches b ON b.id = c.branch_id
+     WHERE ($1::boolean OR c.branch_id = $2)
+     ORDER BY b.sort_order NULLS LAST, c.sort_order, c.id`,
+    [all, siteId],
+  )
+  res.json({ courses: rows })
+})
+
 adminRouter.post('/courses', requireSection('khoa-hoc'), async (req, res) => {
   const id = String(req.body?.id ?? '').trim().toLowerCase()
   if (!/^[a-z0-9-]{2,60}$/.test(id)) return res.status(400).json({ error: 'Mã khóa học không hợp lệ (chữ thường/số/gạch ngang).' })
@@ -160,7 +261,9 @@ adminRouter.post('/courses', requireSection('khoa-hoc'), async (req, res) => {
   if (dup.rows.length) return res.status(409).json({ error: 'Mã khóa học đã tồn tại.' })
 
   const b = req.body
-  const branchId = b.branch_id ? Number(b.branch_id) : null
+  // Cán bộ gán site: khóa học luôn thuộc site của cán bộ, bỏ qua giá trị client gửi.
+  const scope = siteScope(req.user!)
+  const branchId = scope.all ? (b.branch_id ? Number(b.branch_id) : null) : scope.siteId
   const passScore = Math.max(0, Math.min(100, Number(b.pass_score) || 80))
   await query(
     `INSERT INTO courses (id, title, description, grp, branch_id, video_url, duration, summary, pass_score, sort_order,
@@ -178,9 +281,10 @@ adminRouter.post('/courses', requireSection('khoa-hoc'), async (req, res) => {
   res.status(201).json({ id })
 })
 
-adminRouter.put('/courses/:id', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.put('/courses/:id', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const b = req.body
-  const branchId = b.branch_id ? Number(b.branch_id) : null
+  const scope = siteScope(req.user!)
+  const branchId = scope.all ? (b.branch_id ? Number(b.branch_id) : null) : scope.siteId
   const passScore = Math.max(0, Math.min(100, Number(b.pass_score) || 80))
   // Form CMS không gửi questions_per_attempt/randomize_options → nếu ghi thẳng thì mỗi
   // lần sửa khóa học sẽ xóa luôn cấu hình rút đề. COALESCE giữ giá trị cũ khi thiếu khóa.
@@ -209,13 +313,13 @@ adminRouter.put('/courses/:id', requireSection('khoa-hoc'), async (req, res) => 
   res.json({ ok: true })
 })
 
-adminRouter.delete('/courses/:id', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.delete('/courses/:id', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   await query('DELETE FROM courses WHERE id = $1', [req.params.id])
   res.json({ ok: true })
 })
 
 // ---- Câu hỏi của khóa học (bao gồm correct_index, chỉ người có quyền mới thấy) ----
-adminRouter.get('/courses/:id/questions', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.get('/courses/:id/questions', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const { rows } = await query(
     'SELECT id, text, options, correct_index, sort_order FROM questions WHERE course_id=$1 ORDER BY sort_order, id',
     [req.params.id],
@@ -234,7 +338,7 @@ function parseQuestion(body: unknown): { error: string } | { text: string; optio
   return { text, options, correct }
 }
 
-adminRouter.post('/courses/:id/questions', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.post('/courses/:id/questions', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const parsed = parseQuestion(req.body)
   if ('error' in parsed) return res.status(400).json({ error: parsed.error })
   const order = await query('SELECT coalesce(max(sort_order),0)+1 AS n FROM questions WHERE course_id=$1', [req.params.id])
@@ -245,7 +349,7 @@ adminRouter.post('/courses/:id/questions', requireSection('khoa-hoc'), async (re
   res.status(201).json({ id: rows[0].id })
 })
 
-adminRouter.put('/questions/:id', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.put('/questions/:id', requireSection('khoa-hoc'), questionScoped, async (req, res) => {
   const parsed = parseQuestion(req.body)
   if ('error' in parsed) return res.status(400).json({ error: parsed.error })
   await query(
@@ -255,13 +359,13 @@ adminRouter.put('/questions/:id', requireSection('khoa-hoc'), async (req, res) =
   res.json({ ok: true })
 })
 
-adminRouter.delete('/questions/:id', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.delete('/questions/:id', requireSection('khoa-hoc'), questionScoped, async (req, res) => {
   await query('DELETE FROM questions WHERE id = $1', [req.params.id])
   res.json({ ok: true })
 })
 
 // Lịch sử chứng chỉ đã cấp của một khóa học (người đạt, điểm, ngày cấp).
-adminRouter.get('/courses/:id/certificates', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.get('/courses/:id/certificates', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const { rows } = await query(
     `SELECT p.cert_id, p.quiz_score, p.trainee_info, u.full_name,
             to_char(p.completed_at, 'YYYY-MM-DD') AS date
@@ -275,7 +379,7 @@ adminRouter.get('/courses/:id/certificates', requireSection('khoa-hoc'), async (
 })
 
 // Toàn bộ kết quả học viên của một khóa học (cả đạt & chưa đạt).
-adminRouter.get('/courses/:id/results', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.get('/courses/:id/results', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const { rows } = await query(
     `SELECT p.quiz_score, p.passed, p.step, p.cert_id, p.trainee_info,
             u.id AS user_id, u.full_name, u.username,
@@ -296,7 +400,7 @@ adminRouter.get('/courses/:id/results', requireSection('khoa-hoc'), async (req, 
 // Dùng lại hse_portal_tokens để không có cơ chế token thứ hai trong hệ thống.
 
 /** Danh mục chứng nhận đã cấp của một khóa — cả hai lối vào (tài khoản và QR). */
-adminRouter.get('/courses/:id/quiz-certificates', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.get('/courses/:id/quiz-certificates', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const { rows } = await query(
     `SELECT c.id, c.cert_id, c.trainee_name, c.score, c.issued_at, c.expires_at,
             c.source, c.cert_pdf, c.download_key, c.attempt_id,
@@ -313,7 +417,7 @@ adminRouter.get('/courses/:id/quiz-certificates', requireSection('khoa-hoc'), as
   res.json({ certificates: rows })
 })
 
-adminRouter.get('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.get('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const { rows } = await query(
     `SELECT t.id, t.label, t.expires_at, t.max_uses, t.used_count, t.revoked_at,
             t.created_at, u.full_name AS created_by_name,
@@ -328,7 +432,7 @@ adminRouter.get('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), async (r
   res.json({ tokens: rows })
 })
 
-adminRouter.post('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.post('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), courseScoped(), async (req, res) => {
   const courseId = req.params.id
   const c = await query<{ id: string; title: string }>(
     'SELECT id, title FROM courses WHERE id = $1', [courseId])
@@ -363,7 +467,7 @@ adminRouter.post('/courses/:id/quiz-tokens', requireSection('khoa-hoc'), async (
   res.status(201).json({ id: r.rows[0]!.id, token: raw, expires_in_days: days })
 })
 
-adminRouter.delete('/courses/:courseId/quiz-tokens/:id', requireSection('khoa-hoc'), async (req, res) => {
+adminRouter.delete('/courses/:courseId/quiz-tokens/:id', requireSection('khoa-hoc'), courseScoped('courseId'), async (req, res) => {
   const r = await query<{ id: number }>(
     `UPDATE atld.hse_portal_tokens SET revoked_at = now(), revoked_by = $1
      WHERE id = $2 AND course_id = $3 AND purpose = 'quiz' AND revoked_at IS NULL

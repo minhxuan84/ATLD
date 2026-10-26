@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken'
 import type { Request, Response, NextFunction } from 'express'
+import { query } from './db.js'
 
 export type Role = 'trainee' | 'officer' | 'admin'
 
@@ -56,22 +57,57 @@ export function signToken(user: AuthUser, remember = false): string {
   return jwt.sign(user, SECRET, { expiresIn })
 }
 
+// Quyền/site trong JWT có thể đã cũ (admin đổi site/quyền sau khi user đăng nhập, token sống tới 30 ngày).
+// Vì vậy mỗi request nạp lại role/permissions/site_id từ DB, cache ngắn để không query mỗi lần.
+type FreshUser = { role: Role; permissions: CmsSection[]; siteId: number | null; fullName: string }
+const userCache = new Map<number, { at: number; u: FreshUser | null }>()
+const USER_CACHE_MS = 30_000
+
+// Gọi khi sửa/xoá user để thay đổi quyền/site có hiệu lực ngay.
+export function invalidateUserCache(id?: number) {
+  if (id == null) userCache.clear()
+  else userCache.delete(id)
+}
+
+async function loadFreshUser(id: number): Promise<FreshUser | null> {
+  const hit = userCache.get(id)
+  if (hit && Date.now() - hit.at < USER_CACHE_MS) return hit.u
+  const { rows } = await query<{ role: Role; permissions: unknown; site_id: number | null; full_name: string }>(
+    'SELECT role, permissions, site_id, full_name FROM atld.users WHERE id = $1', [id],
+  )
+  const r = rows[0]
+  const u: FreshUser | null = r
+    ? {
+        role: r.role,
+        permissions: Array.isArray(r.permissions) ? (r.permissions as CmsSection[]) : [],
+        siteId: typeof r.site_id === 'number' ? r.site_id : null,
+        fullName: r.full_name,
+      }
+    : null
+  userCache.set(id, { at: Date.now(), u })
+  return u
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization
   if (!header?.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Chưa đăng nhập.' })
   }
+  let payload: AuthUser
   try {
-    const payload = jwt.verify(header.slice(7), SECRET) as AuthUser
-    req.user = {
-      id: payload.id, username: payload.username, fullName: payload.fullName, role: payload.role,
-      permissions: Array.isArray(payload.permissions) ? payload.permissions : [],
-      siteId: typeof payload.siteId === 'number' ? payload.siteId : null,
-    }
-    next()
+    payload = jwt.verify(header.slice(7), SECRET) as AuthUser
   } catch {
     return res.status(401).json({ error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.' })
   }
+  loadFreshUser(payload.id).then((fresh) => {
+    // User đã bị xoá → token không còn giá trị
+    if (!fresh) return res.status(401).json({ error: 'Tài khoản không còn tồn tại.' })
+    req.user = {
+      id: payload.id, username: payload.username, fullName: fresh.fullName,
+      role: fresh.role, permissions: fresh.permissions, siteId: fresh.siteId,
+    }
+    next()
+  }, (err) => next(err))
 }
 
 // RBAC được thực thi phía SERVER — client không thể bỏ qua.
