@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { query } from '../db.js'
-import { requireAuth, requireSection } from '../auth.js'
+import { requireAuth, requireSection, siteScope } from '../auth.js'
 import { findWorkersByTraineeIdentity } from '../lib/hse-training.js'
 import { audit, clientIp, syncWorkerAccess } from '../lib/hse-core.js'
 import { traineePhotoUpload } from '../lib/trainee-photo.js'
@@ -382,6 +382,21 @@ function staffGate(req: Parameters<typeof requireAuth>[0], res: Parameters<typeo
   requireAuth(req, res, () => requireSection('khoa-hoc')(req, res, ok))
 }
 
+/** Cán bộ gán site chỉ tải được PDF khi khóa học HOẶC học viên thuộc site mình. */
+async function pdfInScope(req: Parameters<typeof requireAuth>[0], table: 'cert' | 'attempt', key: string | number) {
+  const { all, siteId } = siteScope(req.user!)
+  if (all) return true
+  const sql = table === 'cert'
+    ? `SELECT 1 FROM atld.quiz_certificates x JOIN atld.courses co ON co.id = x.course_id
+       LEFT JOIN atld.users u ON u.id = x.user_id
+       WHERE x.cert_id = $1 AND (co.branch_id = $2 OR u.site_id = $2)`
+    : `SELECT 1 FROM atld.quiz_attempts x JOIN atld.courses co ON co.id = x.course_id
+       LEFT JOIN atld.users u ON u.id = x.user_id
+       WHERE x.id = $1 AND (co.branch_id = $2 OR u.site_id = $2)`
+  const r = await query(sql, [key, siteId])
+  return r.rows.length > 0
+}
+
 /** Gửi file PDF sau khi kiểm lại đường dẫn nằm trong CERT_DIR. */
 function sendCertPdf(res: Parameters<typeof requireAuth>[1], storedName: unknown, downloadName: string) {
   const filePath = resolveCertPdf(storedName)
@@ -409,9 +424,15 @@ coursesRouter.get('/certificates/:certId/pdf', async (req, res) => {
     return sendCertPdf(res, cert.cert_pdf, `chung-nhan-${cert.cert_id}.pdf`)
   }
 
-  staffGate(req, res, () => {
-    if (!cert) return res.status(404).json({ error: 'Không tìm thấy chứng nhận.' })
-    sendCertPdf(res, cert.cert_pdf, `chung-nhan-${cert.cert_id}.pdf`)
+  staffGate(req, res, async () => {
+    try {
+      if (!cert || !(await pdfInScope(req, 'cert', cert.cert_id))) {
+        return res.status(404).json({ error: 'Không tìm thấy chứng nhận.' })
+      }
+      sendCertPdf(res, cert.cert_pdf, `chung-nhan-${cert.cert_id}.pdf`)
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
   })
 })
 
@@ -432,8 +453,14 @@ coursesRouter.get('/attempts/:id/pdf', async (req, res) => {
     return sendCertPdf(res, attempt.detail_pdf, `bai-lam-${id}.pdf`)
   }
 
-  staffGate(req, res, () => {
-    if (!attempt) return res.status(404).json({ error: 'Không tìm thấy bài làm.' })
-    sendCertPdf(res, attempt.detail_pdf, `bai-lam-${id}.pdf`)
+  staffGate(req, res, async () => {
+    try {
+      if (!attempt || !(await pdfInScope(req, 'attempt', id))) {
+        return res.status(404).json({ error: 'Không tìm thấy bài làm.' })
+      }
+      sendCertPdf(res, attempt.detail_pdf, `bai-lam-${id}.pdf`)
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
   })
 })
